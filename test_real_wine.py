@@ -101,8 +101,10 @@ class RealWineFileTransportTests(unittest.TestCase):
                     self.assertEqual(p.returncode, 0)
                     self.assertLessEqual(len(stdout), 4096)
                     self.assertLessEqual(len(stderr), 4096)
-                    self.assertTrue(stdout.endswith(b"OUT_END"))
-                    self.assertTrue(stderr.endswith(b"ERR_END"))
+                    # Wine/Xvfb can append their own teardown diagnostics after
+                    # the program exits; the bounded tail must retain markers.
+                    self.assertIn(b"OUT_END", stdout, repr(stdout[-512:]))
+                    self.assertIn(b"ERR_END", stderr, repr(stderr[-512:]))
                 finally:
                     p.close_worker()
 
