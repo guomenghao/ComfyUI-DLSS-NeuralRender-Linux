@@ -29,8 +29,8 @@ int main(int argc, char **argv) {
             fputs("diagnostic stdout noise\n", stdout);
             fputs("diagnostic stderr noise\n", stderr);
         }
-        fputs("OUT_END", stdout); fputs("ERR_END", stderr);
-        return 0;
+        fputs("DIAGNOSTICS_END", stdout); fputs("DIAGNOSTICS_END", stderr);
+        return fflush(stdout) == 0 && fflush(stderr) == 0 ? 0 : 6;
     }
     const char *ready = getenv("V2D_TEST_READY");
     const char *late = getenv("V2D_TEST_LATE");
@@ -52,89 +52,99 @@ int main(int argc, char **argv) {
 @unittest.skipUnless(os.environ.get("V2D_TEST_REAL_WINE") == "1",
                      "Set V2D_TEST_REAL_WINE=1 with Wine/Xvfb/MinGW installed")
 class RealWineFileTransportTests(unittest.TestCase):
-    def test_binary_stdio_through_actual_wine_cmd(self):
-        wine = shutil.which("wine")
+    @classmethod
+    def setUpClass(cls):
+        cls.wine = shutil.which("wine")
         compiler = shutil.which("x86_64-w64-mingw32-gcc")
-        self.assertTrue(wine and compiler and shutil.which("xvfb-run"),
-                        "Wine, Xvfb and x64 MinGW are required for this integration test")
-        with tempfile.TemporaryDirectory(prefix="v2d_real_wine_", dir="/tmp") as temp:
-            root = Path(temp)
-            prefix = root / "prefix"
-            # Spaces in worker and batch paths also exercise Wine's argv quoting.
-            folder = root / "worker with spaces"
-            folder.mkdir()
-            source, exe = folder / "copy.c", folder / "copy.exe"
-            source.write_text(SOURCE)
-            subprocess.run([compiler, "-O2", "-static", str(source), "-o", str(exe)],
-                           check=True, timeout=60)
-            for leaf in ("nvngx_dlss.dll", "nvngx_dlssnr.dll", "nvngx.dll_dlssnr.dll"):
-                (folder / leaf).write_bytes(b"MZtransport fixture; no GPU DLL is loaded")
-            env = os.environ.copy()
-            env.update({"WINEPREFIX": str(prefix), "WINEARCH": "win64", "WINEDEBUG": "-all"})
-            init = subprocess.run(["xvfb-run", "-a", wine, "wineboot", "-u"], env=env,
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
-            self.assertEqual(init.returncode, 0, init.stdout[-5000:].decode("utf-8", "replace"))
-            frames = np.arange(2 * 8 * 16 * 3, dtype=np.uint8).reshape(2, 8, 16, 3)
-            logs = []
-            with patch.object(runtime, "CONFIG_PATH", root / "no-config.json"), patch.dict(os.environ, {
-                    "VIDEO2DLSSNR_WINE": wine, "WINEPREFIX": str(prefix),
-                    "VIDEO2DLSSNR_XVFB": "1", "VIDEO2DLSSNR_VIDEO_TRANSPORT": "files",
-                    "VIDEO2DLSSNR_TIMEOUT": "90", "WINEDEBUG": "-all"}):
-                # Force the private batch directory itself to contain spaces.
-                with patch.object(nodes.tempfile, "gettempdir", return_value=str(folder)):
-                    result = nodes.run_video_np(frames, 0, 1, [], False, "lk", False,
-                                                str(exe), log=logs)
-                special_folder = root / "worker 50% & literal!"
-                special_folder.mkdir()
-                for source_file in folder.glob("*.dll"):
-                    shutil.copy2(source_file, special_folder / source_file.name)
-                special_exe = special_folder / "copy.exe"
-                shutil.copy2(exe, special_exe)
-                special_result = nodes.run_video_np(frames, 0, 1, [], False, "lk", False, str(special_exe))
-                np.testing.assert_array_equal(special_result, frames)
-                # Exercise the actual Wine process, not just a Python mock.
-                p = runtime.RuntimeProcess(str(exe), ["--diagnostics"],
-                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                try:
-                    stdout, stderr = p.collect_output(limit=4096)
-                    p.check_timeout()
-                    self.assertEqual(p.returncode, 0)
-                    self.assertLessEqual(len(stdout), 4096)
-                    self.assertLessEqual(len(stderr), 4096)
-                    # Wine can route Windows stdout/stderr into one Unix pipe.
-                    # Only cmd's explicit file redirection guarantees separation.
-                    diagnostic_tail = stdout + stderr
-                    self.assertIn(b"OUT_END", diagnostic_tail, repr(diagnostic_tail[-512:]))
-                    self.assertIn(b"ERR_END", diagnostic_tail, repr(diagnostic_tail[-512:]))
-                finally:
-                    p.close_worker()
+        if not (cls.wine and compiler and shutil.which("xvfb-run")):
+            raise RuntimeError("Wine, Xvfb and x64 MinGW are required for this integration test")
+        temp = tempfile.TemporaryDirectory(prefix="v2d_real_wine_", dir="/tmp")
+        cls.addClassCleanup(temp.cleanup)
+        cls.root = Path(temp.name)
+        cls.prefix = cls.root / "prefix"
+        cls.folder = cls.root / "worker with spaces"
+        cls.folder.mkdir()
+        source, cls.exe = cls.folder / "copy.c", cls.folder / "copy.exe"
+        source.write_text(SOURCE)
+        subprocess.run([compiler, "-O2", "-static", str(source), "-o", str(cls.exe)],
+                       check=True, timeout=60)
+        for leaf in ("nvngx_dlss.dll", "nvngx_dlssnr.dll", "nvngx.dll_dlssnr.dll"):
+            (cls.folder / leaf).write_bytes(b"MZtransport fixture; no GPU DLL is loaded")
+        env = os.environ.copy()
+        env.update({"WINEPREFIX": str(cls.prefix), "WINEARCH": "win64", "WINEDEBUG": "-all"})
+        init = subprocess.run(["xvfb-run", "-a", cls.wine, "wineboot", "-u"], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+        if init.returncode:
+            raise RuntimeError(init.stdout[-5000:].decode("utf-8", "replace"))
+        cls.frames = np.arange(2 * 8 * 16 * 3, dtype=np.uint8).reshape(2, 8, 16, 3)
 
-                ready, late = root / "worker-ready", root / "escaped-worker"
-                requested, stop = threading.Event(), threading.Event()
-                observed = []
-                def request_when_worker_is_running():
-                    while not stop.wait(0.05):
-                        if ready.exists():
-                            observed.append(True)
-                            requested.set()
-                            return
-                monitor = threading.Thread(target=request_when_worker_is_running, daemon=True)
-                monitor.start()
-                with patch.dict(os.environ, {
-                        "V2D_TEST_READY": runtime.windows_path(str(ready), prefix),
-                        "V2D_TEST_LATE": runtime.windows_path(str(late), prefix)}), patch.object(
-                        nodes, "cancellation_settings", return_value={"cancel_check": requested.is_set}):
-                    try:
-                        with self.assertRaisesRegex(RuntimeError, "cancelled"):
-                            nodes.run_video_np(frames, 0, 1, [], False, "lk", False, str(exe))
-                        self.assertTrue(observed, "cancellation must occur after the Windows worker starts")
-                        time.sleep(2.2)
-                        self.assertFalse(late.exists(), "cancelled Windows worker must not survive its launcher")
-                    finally:
-                        stop.set()
-                        monitor.join(timeout=1)
-            np.testing.assert_array_equal(result, frames)
-            self.assertIn("REAL_WINE_STDERR", "\n".join(logs))
+    def setUp(self):
+        for context in (patch.object(runtime, "CONFIG_PATH", self.root / "no-config.json"),
+                        patch.dict(os.environ, {"VIDEO2DLSSNR_WINE": self.wine,
+                            "WINEPREFIX": str(self.prefix), "VIDEO2DLSSNR_XVFB": "1",
+                            "VIDEO2DLSSNR_VIDEO_TRANSPORT": "files",
+                            "VIDEO2DLSSNR_TIMEOUT": "90", "WINEDEBUG": "-all"})):
+            context.start()
+            self.addCleanup(context.stop)
+
+    def test_binary_stdio_through_actual_wine_cmd(self):
+        logs = []
+        # Force the private batch directory itself to contain spaces.
+        with patch.object(nodes.tempfile, "gettempdir", return_value=str(self.folder)):
+            result = nodes.run_video_np(self.frames, 0, 1, [], False, "lk", False,
+                                        str(self.exe), log=logs)
+        np.testing.assert_array_equal(result, self.frames)
+        self.assertIn("REAL_WINE_STDERR", "\n".join(logs))
+        special_folder = self.root / "worker 50% & literal!"
+        special_folder.mkdir()
+        for source_file in self.folder.glob("*.dll"):
+            shutil.copy2(source_file, special_folder / source_file.name)
+        special_exe = special_folder / "copy.exe"
+        shutil.copy2(self.exe, special_exe)
+        result = nodes.run_video_np(self.frames, 0, 1, [], False, "lk", False, str(special_exe))
+        np.testing.assert_array_equal(result, self.frames)
+
+    def test_cancelled_windows_worker_cannot_continue(self):
+        ready, late = self.root / "worker-ready", self.root / "escaped-worker"
+        requested, stop = threading.Event(), threading.Event()
+        observed = []
+        def request_when_worker_is_running():
+            while not stop.wait(0.05):
+                if ready.exists():
+                    observed.append(True)
+                    requested.set()
+                    return
+        monitor = threading.Thread(target=request_when_worker_is_running, daemon=True)
+        monitor.start()
+        with patch.dict(os.environ, {"V2D_TEST_READY": runtime.windows_path(str(ready), self.prefix),
+                                     "V2D_TEST_LATE": runtime.windows_path(str(late), self.prefix)}), patch.object(
+                nodes, "cancellation_settings", return_value={"cancel_check": requested.is_set}):
+            try:
+                with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                    nodes.run_video_np(self.frames, 0, 1, [], False, "lk", False, str(self.exe))
+                self.assertTrue(observed, "cancellation must occur after the Windows worker starts")
+                time.sleep(2.2)
+                self.assertFalse(late.exists(), "cancelled Windows worker must not survive its launcher")
+            finally:
+                stop.set()
+                monitor.join(timeout=1)
+
+    def test_diagnostic_capture_is_bounded(self):
+        p = runtime.RuntimeProcess(str(self.exe), ["--diagnostics"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            stdout, stderr = p.collect_output(limit=4096)
+            p.check_timeout()
+            self.assertEqual(p.returncode, 0)
+            self.assertLessEqual(len(stdout), 4096)
+            self.assertLessEqual(len(stderr), 4096)
+            # Wine's console forwarding can merge and reorder the Windows
+            # channels. Both emit the same end marker so whichever arrives
+            # last has a verifiable terminal record in its bounded tail.
+            tail = stdout + stderr
+            self.assertIn(b"DIAGNOSTICS_END", tail, repr(tail[-512:]))
+        finally:
+            p.close_worker()
 
 
 if __name__ == "__main__":
