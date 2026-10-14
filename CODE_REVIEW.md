@@ -1,57 +1,84 @@
-# 代码复查记录 — 2026-10-14
+# 影栈（CineStack）DLSS · 运行维护指南
 
-复查基线：公开仓库 `a1f33c34feb8a7763f5661f8305a1d727e8c977b`。范围为所有本项目 Python、安装脚本、运行库下载/部署、测试及 CI；对照上游 v1.4.1 C++ 的像素协议与 HDR 参数，以及当前 ComfyUI VIDEO 和任务中断接口。此报告记录确认的问题及对应修复，不代表整个节点已无缺陷。
+本指南说明节点的运行行为、资源要求与维护检查方法。功能与安装见 [README](README.md)，输出验收见 [功能验收指南](VALIDATION.md)。
 
-## 确认并修复的问题
+## 运行与数据处理
 
-| 优先级 | 触发条件与影响 | 修复和证据 |
-| --- | --- | --- |
-| P1 | 内存 VIDEO 标记为 HDR PQ/HLG，但 `auto` 只读取串流；可能误判 SDR，或为探测而编码整个输入 | 优先读取 `get_color_space()`；旧 API 才读取 PyAV；无法探测时报错并提示显式选择。测试确认内存 HDR 不调用串流生成，旧流的游标恢复到原位置 |
-| P1 | 旧 ComfyUI 的 VIDEO 构造器不支持 HDR 参数，原代码吞掉 TypeError 后生成 SDR 标签 | 不再静默降级；GPU 处理前检查输出 API 支持。测试拒绝旧构造器，验证 PQ/HLG、10-bit、音频对象和分数帧率的传递 |
-| P2 | 文件传输仍先建立整段 alpha/RGBA 副本，输出 RGB 又持有整段 RGBA 数据 | 输入逐帧使用 RGBA 缓冲，输出逐帧读入独立 RGB 数组；管道输入也改为逐帧转换。测试禁止整段 concatenate，检查每次只读取一帧及输出数组拥有独立内存 |
-| P2 | `communicate()` 先缓存全部日志，之后截断；单行 stderr 也可无限长 | 图像、文件视频、探测同时排空 stdout/stderr，只保留有限尾部；管道 stderr 限制每次读取长度。真实子进程测试分别输出 5 MB 日志，确认仍正常完成且只返回限定尾部 |
-| P2 | 点击取消后，阻塞在工作程序读写，通常只能等待超时；父进程已退出时清理不终止仍存活的同组子进程 | 工作程序监视 ComfyUI 中断状态，终止所拥有的进程组，并在执行线程抛出 ComfyUI 中断异常；关闭时也清理已退出父进程的同组后代。测试覆盖图像、管道、文件三条路径及延迟子进程 |
-| P2 | float32、非 RGB、空尺寸、非法传递函数/尺寸仍可能进入原始像素协议，导致字节数错误或难懂的底层失败 | 启动前验证形状、dtype、SDR/HDR 配对、尺寸、光流引擎、白点和帧率；测试确认非法输入不启动工作程序 |
-| P2 | 更新安装把手工设置的长视频超时重置为 600 秒；即使保存配置有有效超时，非法 shell 默认值也先触发错误 | 重新配置前验证并保留现有超时；先选用最终配置值再验证。首次安装仍为 600 秒；环境字段按部署方案生成并备份旧配置 |
-| P2 | NVIDIA 归档解压中断后留有目标目录，归档的下一次解压可能拒绝已存在的目标 | 改在独立临时目录提取并检查 x64 NGX 桥，成功才移到最终位置；保留原残留目录为备份。测试确认失败不替换旧目录，重试成功且保留旧文件 |
-| P2 | 安装器只检查驱动，随后却固定按 RTX 5090 名称过滤 GPU；其他型号可能完成安装却选不到显卡 | 在安装系统包前检查实际 GPU/驱动组合，明确限制自动部署为 RTX 5090 / 610.57.04；其他环境继续使用手动配置入口 |
+- Linux 工作程序使用专用 Wine 配置，Windows 直接执行上游 EXE。
+- 输入在启动前检查尺寸、数据类型、色彩格式、帧率及相关参数。
+- Linux 可使用原始帧文件传输，隔离 Wine 日志与图像数据；返回字节数和退出状态必须满足要求。
+- HDR 输入需要兼容的 ComfyUI `VIDEO` API；无法正确保留 HDR 元数据时会报错。
+- 运行文件通过固定发布资产与 SHA-256 校验获取；更新配置会保留有效的任务超时设置。
 
-P1 表示可能影响输出内容或色彩正确性；P2 表示任务运行、资源占用或部署可靠性问题。
+## 资源规划
 
-## 验证方式与限制
+ComfyUI 的 `IMAGE` / `VIDEO` 接口与节点处理仍可能持有完整帧批次。逐帧转换缓冲并不等于端到端流式处理；输入张量、RGB 数组与浮点输出需要 RAM。
 
-- 本地 unittest 包括真实 Python 子进程和临时文件、回环 HTTP 下载/续传、元数据模拟接口。真实 Wine 测试在本地 macOS 跳过，由 Linux CI 单独执行。
-- `test_real_wine.py` 编译并执行真实 Windows 小程序，检查 Wine cmd 文件重定向、带空格路径、二进制完整性、日志隔离、日志上限，以及取消后 Windows 工作程序不能继续创建延迟标记。它不调用 DLSS 或 NVIDIA GPU。
-- Python 编译检查和 `bash -n setup_ubuntu24.sh` 检查语法。提取恢复测试使用小型模拟归档；不会运行 NVIDIA 安装器。
-- 历史目标机器的单图与两帧 SDR / LK GPU PASS 对应旧实现提交 `dd7249d...`，记录于 [VALIDATION.md](VALIDATION.md)。此次修订需要在目标机器重新测试；不能把 CI 成功视为新版 GPU 实测。
+文件传输还需要输入与输出 RGBA 原始帧的临时磁盘空间。长视频应先使用代表性短片评估资源，再确定批次大小、临时目录和任务超时。运行结束后检查输出完整性。
 
-## 尚未完成的实机验收
+## 超时与取消
 
-1. 当前完整 ComfyUI 用户工作流、HDR 保存/色彩和音轨编码；测试已验证 Python 元数据传递，未验证最终 HDR/音频文件。
-2. 超分、NVOF/auto、长视频、不同显卡/驱动，以及 Windows GPU 回归。
-3. 真实 GE-Proton / NGX 任务在取消或超时后的清理；CI 覆盖普通 Wine Windows 程序。自行脱离所属 Unix 进程组的子进程不能仅凭 `killpg` 保证清理。运行时不会调用影响共享客户端的 `wineserver -k`。
-4. ComfyUI IMAGE/VIDEO API 本身要求整个帧批次在内存中；改为逐帧 RGBA 缓冲仍非端到端流式视频，输入张量、RGB 数组、浮点输出仍可能占用大量 RAM。文件传输还需要整段输入/输出的临时磁盘空间，日志文件也占用磁盘。
-5. 上游 EXE/DLL 保持固定哈希且未修改；其模型、着色器、视觉质量和闭源 NVIDIA 运行库不在本次 Python 代码修复的验证范围内。
+`linux-runtime.json` 中的 `timeout_seconds` 优先于环境默认值。默认超时为 1800 秒，自动安装首次配置为 600 秒；重新配置会保留已有有效值。
 
-当前运行库获取有固定发布资产、ZIP 与文件 SHA-256 校验，路径与归档遍历拒绝、部署文件备份及原子替换测试。本次未发现需要替换当前 Linux 驱动的代码证据。
+取消或超时会终止本次工作程序所属进程组，并向 ComfyUI 返回相应异常。自行脱离该进程组的后代进程不属于这一清理保证的范围。不要使用影响所有 Python 或共享 Wine 客户端的批量终止命令。
 
-## API 对照来源
+## 手动启停
 
-- [ComfyUI VIDEO 实现](https://github.com/comfyanonymous/ComfyUI/blob/master/comfy_api/latest/_input_impl/video_types.py)：`get_color_space()`、`VideoFromComponents` 的 HDR 参数。
-- [ComfyUI 任务中断接口](https://github.com/comfyanonymous/ComfyUI/blob/master/comfy/model_management.py)：`processing_interrupted()`、`throw_exception_if_processing_interrupted()`、`InterruptProcessingException`。
-- [video2dlssnr v1.4.1 源码](https://github.com/DaniilSokolyuk/video2dlssnr/tree/v1.4.1/src)：`--nr-video` 的 RGBA 8/16-bit 协议及 HDR 选择。HDR 路线由上游自动选择 16-bit，因此未将未显式传递 `--nr-pipe-bits` 误报为缺陷。
-
-## 更新和重新验收
-
-暂停 ComfyUI 当前生成任务，执行：
+将 `start.sh` 与 `stop.sh` 一起放到包含 `main.py` 的 ComfyUI 安装目录。Linux 需要可用的 Xvfb / Xauth；启停时使用同一组设置。
 
 ```bash
-cd "$HOME/ComfyUI/custom_nodes/ComfyUI-DLSS-NeuralRender-Linux"
-git status --short
-git pull --ff-only
-V2D_REVIEW_TEST_DIR="${V2D_STATE:-$HOME/.local/share/video2dlssnr-linux-610.57.04}/gpu-test-review-$(date +%Y%m%d-%H%M%S)"
-python -u smoke_gpu.py --node "$PWD" --output "$V2D_REVIEW_TEST_DIR"
-cat "$V2D_REVIEW_TEST_DIR/results.json"
+COMFYUI_DIR="/path/to/ComfyUI"
+export V2D_COMFY_PYTHON="/path/to/comfyui-python"
+cp start.sh stop.sh "$COMFYUI_DIR/"
+chmod +x "$COMFYUI_DIR/start.sh" "$COMFYUI_DIR/stop.sh"
+"$COMFYUI_DIR/start.sh"
 ```
 
-本次 Python 更新不需要重下运行库或更换驱动。已配置机器可直接运行上述测试并重启 ComfyUI；只有需要重新部署配置时才运行 `bash setup_ubuntu24.sh install`。有本地修改导致 pull 停止时，先处理修改，不使用强制 reset。
+停止或重新启动：
+
+```bash
+"$COMFYUI_DIR/stop.sh"
+"$COMFYUI_DIR/start.sh"
+```
+
+| 设置 | 用途 |
+| --- | --- |
+| `V2D_COMFY_PYTHON` | ComfyUI 使用的 Python 可执行文件绝对路径；通用部署应显式指定 |
+| `V2D_COMFY_PORT` | 监听端口，默认 `8188` |
+| `V2D_COMFY_STOP_TIMEOUT` | 停止等待秒数，默认 `20` |
+
+脚本以 `--listen 0.0.0.0 --port 8188 --enable-manager` 的默认参数启动，端口可按表中设置调整。日志追加到安装目录的 `comfy.log`；启动信息仅确认进程已创建，服务就绪以日志与实际连接为准。
+
+控制器检查脚本、工作目录、端口和进程启动身份，避免重复启动；停止仅处理匹配的 ComfyUI 实例。`.comfyui-control/` 保存每个端口的状态与锁。该工具依赖 Linux `/proc`。
+
+## 更新与恢复
+
+在节点目录检查本地修改并更新：
+
+```bash
+git status --short
+git pull --ff-only
+```
+
+源码更新通常不需要重新下载运行库。运行库或 Wine 配置变更时，按 [Linux 指南](LINUX.md) 重新配置，再完成相应验收。不要用强制重置覆盖需要保留的本地修改。
+
+回退节点时，先停止相关任务，将不再使用的节点目录移到 `custom_nodes` 之外，再恢复备份。备份目录放在 `custom_nodes` 内仍可能被加载，导致节点 ID 冲突。
+
+## NVENC 与开机入口
+
+需要容器 GPU 编码修复时，先按 [NVENC 指南](NVENC_CONTAINER.md) 通过实际编码测试，再部署持久化配置。开机入口必须由运行平台实际执行；仅创建脚本不代表自动启动已生效。
+
+每次重新启动后，检查服务日志与实际 GPU 编码工作流。更换镜像或替换存储需要重新部署。
+
+## 开发验证
+
+在具有 NumPy、PyTorch、Pillow 的 Python 环境中执行：
+
+```bash
+python -m unittest discover -s . -p 'test_*.py' -v
+bash -n setup_ubuntu24.sh start.sh stop.sh
+```
+
+回归覆盖数据传输、元数据、路径、超时、取消、日志边界、下载校验、安装恢复、进程身份及持久化配置。真实 Wine 协议测试需要 Wine / Xvfb / MinGW，并设置 `V2D_TEST_REAL_WINE=1`。
+
+这些测试不执行 NVIDIA DLSS，也不评价上游模型的视觉质量。上游 EXE / DLL 保留原始二进制；GPU 与制作流程仍按 [验收指南](VALIDATION.md) 检查。

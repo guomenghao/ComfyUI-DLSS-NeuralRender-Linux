@@ -1,56 +1,76 @@
-# Linux/Wine 实机验证记录
+# 影栈（CineStack）DLSS · 功能验收指南
 
-日期：2026-10-14。证据来自用户提供的目标机器终端日志与 `smoke_gpu.py` 输出，维护者未远程登录该机器，也未直接查看其生成视频的视觉效果。此记录不包含主机标识或完整私人日志。
+本指南用于检查节点安装、GPU 调用与实际输出。建议在首次部署、运行库变更或迁移硬件后执行；完整工作流应另用实际制作素材验收。
 
-## 环境
+## 验收层级
 
-| 项目 | 已报告配置 |
-| --- | --- |
-| 系统 | Ubuntu 24.04.1 LTS，x86-64，Docker，无桌面 |
-| GPU | NVIDIA GeForce RTX 5090，32607 MiB |
-| 实际 Linux 驱动 | 610.57.04 |
-| Wine / 图形库 | GE-Proton11-6，DXVK 3.10，VKD3D-Proton 3.1.0 |
-| 上游运行库 | video2dlssnr v1.4.1；DLSS/NR DLL 310.8.0.0，原版二进制未修改 |
-| Shader compiler | 微软 x64 d3dcompiler_47.dll 10.0.28000.2705 |
-| 视频传输 | 独立 raw RGBA 文件，通过 Wine cmd 重定向；日志单独读取 |
-| 视频测试源码提交 | `dd7249d95f126492efb9641c8fffeb1581750ebf` |
+| 层级 | 检查内容 | 可以确认的范围 |
+| --- | --- | --- |
+| 配置检查 | 路径、Wine prefix、运行库文件 | 文件与配置可用 |
+| 启动检查 | 工作程序帮助页 | Wine 能启动 Windows 程序 |
+| NR 探测 | 创建与求值 NGX feature 18 | 基础 NR 调用可执行 |
+| 图像 / 视频测试 | 实际处理并检查生成文件 | 所测尺寸与参数下的输出完整性 |
+| 制作工作流 | 真实素材、保存节点、编码及回放 | 实际交付流程的可用性 |
 
-Wine/DXGI 在 Windows API 中报告的 `999.99 / UMD 35.0.19.9999` 不是本机实际 Linux 驱动版本；上表采用 `nvidia-smi` 的版本。
+## 自动安装配置验收
 
-## 已通过的检查
+在节点目录及 ComfyUI Python 环境中执行：
 
-1. 生产 NR feature 18 探测：route F forwarder，`Init_Ext`、`CreateFeature 18`、`EvaluateFeature 18` 返回成功，worker 正常退出。
-2. 单图阶段：CLI 返回可解码的 1280×720 RGB PNG，dtype 与尺寸检查通过。它在此前测试运行中完成；随后修复编译器及视频调用并单独复测视频。
-3. 视频阶段：新版编译器与批处理路径修复后，上游 `--nr-video` 返回完整帧数据，保存 PNG 与 MP4；FFprobe 验证分辨率、帧数、帧率。
-
-视频报告中的关键字段：
-
-```json
-{
-  "status": "PASS",
-  "kind": "real target Wine/NVIDIA NR test",
-  "scale": 1,
-  "motion_engine": "lk",
-  "scope": "video-only",
-  "audio": "synthetic input has no audio; not an audio preservation test",
-  "video": {
-    "width": 1280,
-    "height": 720,
-    "r_frame_rate": "2/1",
-    "nb_read_frames": "2"
-  }
-}
+```bash
+bash setup_ubuntu24.sh test
 ```
 
-测试使用合成画面，两帧之间有横向位移。GPU 日志报告 `optical flow: Lucas-Kanade (GPU compute)`。运行中仍有无显示器 EDID、OpenXR 及 Vulkan fixme 提示，但这次任务最终完成并通过输出结构检查。
+该入口依次检查帮助页、生产 NR 路线和实际图像 / 视频输出；任一阶段失败即停止。其适用范围与自动安装配置一致，见 [Linux 指南](LINUX.md)。
 
-此外，[GitHub CI 的真实 Wine 测试](https://github.com/guomenghao/ComfyUI-DLSS-NeuralRender-Linux/actions/runs/38508006233)使用 MinGW 编译的小型 Windows 程序，验证实际 Wine cmd、带空格路径、二进制字节完整性及 stderr 隔离。CI 不调用 NVIDIA GPU 或 DLSS；该结果与目标机器 GPU 测试分别记录。
+## 手动配置验收
 
-## 尚未验收
+```bash
+python check_runtime.py
+python check_runtime.py --help-worker
+python check_runtime.py --probe-nr --adapter 0
+```
 
-- ComfyUI 内实际用户工作流和真实素材的视觉质量。
-- scale=1.5/2 等放大模式、其他分辨率及长视频。
-- NVOF/auto 后端、HDR PQ/HLG、音轨保留。
-- 其他显卡、驱动、发行版与 Windows GPU 路线。
+前三项通过后，在节点目录运行输出测试；选择空的验收目录：
 
-短样本成功证明这套环境能够完成 NR 图像及基础 SDR 视频处理，不构成对全部参数、时长、质量或其他硬件的保证。该节点保持原有帧数，不执行插帧。
+```bash
+V2D_ACCEPTANCE_DIR="/path/to/acceptance-output"
+python -u smoke_gpu.py --node "$PWD" --output "$V2D_ACCEPTANCE_DIR"
+cat "$V2D_ACCEPTANCE_DIR/results.json"
+```
+
+仅复测视频时可追加 `--video-only`。不要将单阶段测试结果视为完整验收。
+
+## 合成样本测试范围
+
+`smoke_gpu.py` 默认使用原生分辨率、1280×720 的图像与两帧 SDR 视频样本，视频为 2 FPS，`scale=1`、`motion_engine=lk`。样本不含音轨。
+
+通过标准包括工作程序正常退出、返回帧数据完整、输出可解码，以及视频尺寸、帧数和帧率与预期一致。检查 JSON 中的 `status` 与测试范围，并查看生成图像与视频。
+
+合成短样本不覆盖超分、音轨保留、HDR、长视频性能或视觉质量。可选 NVENC 工具的编码测试也不替代完整 ComfyUI 工作流验收。
+
+## ComfyUI 工作流验收
+
+1. 使用 `Load Image → DLSS Neural Rendering (Image) → Save Image` 检查图像处理，从 `scale=1` 开始。
+2. 使用 `Load Video → DLSS Neural Rendering (Video) → Save Video` 检查短 SDR 视频，从 `motion_engine=lk` 开始。
+3. 对制作中需要的缩放、光流引擎、音频和 HDR 参数逐项测试，避免一次变更多个设置。
+4. 检查保存文件的分辨率、帧数、帧率、色彩标记、音轨、完整解码和实际回放效果。
+5. 使用代表性时长的素材评估 RAM、显存、临时磁盘占用与处理时间。
+
+使用 `IMAGE` 帧批次时需明确 `images_fps`，该输入自身不带音轨。Neural Rendering 节点保持帧数；插帧需使用独立 Frame Generation 节点。
+
+## 兼容性状态
+
+| 功能 | 验证范围 |
+| --- | --- |
+| Linux NR 单图 | 已有原生分辨率输出验证；部署后按需复测 |
+| Linux SDR 视频 / LK | 已有短样本验证；不代表任意时长与尺寸 |
+| 可选 H.264 NVENC 工具 | 已有短编码与解码验证；需在部署环境复测 |
+| 超分、HDR、NVOF / auto、音轨与长视频 | 需独立验收 |
+| Windows、其他硬件 / 驱动组合 | 需独立验收 |
+| 完整 ComfyUI DLSS + GPU 编码链路 | 按实际工作流验收 |
+
+CI 检查传输协议、文件、进程与配置行为，不调用 NVIDIA DLSS。测试通过与画面审美评价应分别记录。
+
+## 验收资料
+
+保留所用源码版本、参数、输入素材、输出文件及测试报告，便于复现。对外提交问题时只提供必要信息；不要公开账号、凭据、主机标识或包含私人路径的完整环境与日志。

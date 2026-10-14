@@ -1,147 +1,128 @@
-# Optional NVENC workaround inside a Linux container
+# 影栈（CineStack）DLSS · 容器 GPU 编码指南
 
-This is a separate experimental workaround for native Linux FFmpeg. It does
-not run FFmpeg through Wine. Keep the existing NVIDIA driver and Wine setup.
-The target user's 610.57.04 container loads matching CUDA/NVENC/NVDEC libraries
-and NVENC API 13.1, but `OpenEncodeSessionEx` returns unsupported device (2).
-The revised PCI mapping passed the user's actual H.264 NVENC test on this
-Ubuntu 24.04 x86_64 Docker / RTX 5090 / Linux 610.57.04 target on 2026-10-14.
-Both 256x256 and 1296x720 outputs contained 12 H.264 frames, encoder exit code
-0, and all frames decoded successfully. The source SHA-256 was
-`4b068c35c74f2ee62a175cbad46d79d11138eeecd6aa1fa24a581a06c500e687`.
-This confirms two short standalone GPU encoding tests. Joint DLSSG + NVENC
-execution inside ComfyUI, audio, HDR, HEVC, AV1 and long video remain pending.
-The same target has already passed short native DLSSG interpolation with CPU
-H.264 encoding at 1296x720, 30 to 60 FPS, 12 input and 24 output frames.
+本指南介绍原生 Linux FFmpeg 的可选 NVENC GPU 枚举修复，以及 ComfyUI 的持久化启动配置。此组件为实验性部署工具，适用于出现 `OpenEncodeSessionEx: unsupported device (2)` 的部分 NVIDIA 容器环境。
 
-The workaround intercepts the attached GPU ID query and filters the response
-to devices already accessible in the container. It grants no additional GPU
-access. `nvenc_fix.c` is based on
-[flexgrip/nvidia-gpu-enumeration](https://github.com/flexgrip/nvidia-gpu-enumeration)
-commit `1475091ae9e8fb23cc22d565adf932a488d00bcd`. That component uses GPL-3.0;
-its license is retained in `NVENC_FIX_LICENSE.txt`. The other project source
-retains its existing license.
+工具保留现有 NVIDIA 驱动与 Wine 配置。修复仅在 FFmpeg 包装器中加载，不向 ComfyUI、PyTorch 或 Wine 全局注入 `LD_PRELOAD`。
 
-Local changes check the complete ioctl code, RM control ABI, successful status,
-and NVIDIA control character device. GPU IDs remain opaque: the shim calls
-`GET_PCI_INFO` from NVIDIA's 610.57.04 headers, then matches the complete PCI
-**domain, bus and slot** against `/proc/driver/nvidia/gpus/*/information` to
-obtain the Linux `Device Minor`. It does not equate RM `deviceInstance` with a
-Linux minor, nor derive PCI addresses by shifting GPU IDs. All returned IDs
-must resolve without ambiguity before filtering; otherwise the original list
-is retained. Immutable caches initialize before FFmpeg starts its threads.
-Device existence is checked against actual character-device numbers and a
-successful open, rather than a pathname alone.
+## 使用前提
 
-### Target failure captured on 2026-10-14
+- Linux x86-64，容器中可访问 NVIDIA GPU 与配套编码运行库。
+- `/usr/bin/ffmpeg` 和 `/usr/bin/ffprobe` 可用，FFmpeg 包含 `h264_nvenc`。
+- 有 `gcc` 与 C 标准库开发文件用于构建组件。
+- 使用持久化磁盘保存运行文件与配置。
 
-The first target trial did **not** pass. It exposed an error in the initial
-mapping: RM `deviceInstance=2` belonged to GPU ID `0x6a00`, while Linux device
-minor 2 belonged to PCI `0000:94:00.0`, GPU ID `0x9400`. The shim mistakenly
-retained `0x6a00`, causing CUDA initialization to return `CUDA_ERROR_NO_DEVICE`
-in the scoped FFmpeg process. The revised shim uses `GET_PCI_INFO` and a
-regression reproduces this eight-GPU ordering, including duplicate bus numbers
-across PCI domains. The revised source has now passed both standalone H.264 GPU encoding tests:
-logs show correct retention of GPU ID `0x9400`, PCI `0000:94:00`, Linux minor
-2, filtering the host list from eight IDs to the one accessible GPU. FFmpeg
-reports `h264_nvenc`, both 12-frame files were decoded, and `results.json`
-reports `PASS`. These are user-provided target results, separate from CI.
-Raw host logs, host identifiers, and GPU UUIDs are not published.
+该修复针对显卡枚举问题，不覆盖所有 NVENC 初始化故障。缺少编码运行库、GPU 不支持编码或容器设备未开放时，需先解决对应部署问题。
 
-## Build and run the GPU test
+## 构建与验收
 
-From this repository, on Linux x86_64 with `/usr/bin/ffmpeg` and `ffprobe`:
+在节点目录及 ComfyUI 的 Python 环境中运行。Ubuntu / Debian 可先安装编译依赖：
 
 ```bash
-apt-get install -y --no-install-recommends gcc libc6-dev
-/root/miniconda3/bin/python nvenc_container.py test
+sudo apt-get install -y --no-install-recommends gcc libc6-dev
+python nvenc_container.py test
 ```
 
-Run after other GPU tasks finish. The helper builds into a source-hash directory
-under `~/.local/share/comfyui-nvenc-fix/` (or `V2D_NVENC_STATE`). It generates an
-FFmpeg-only wrapper. `LD_PRELOAD` is set inside that wrapper, not globally in
-ComfyUI, PyTorch, Wine, or shell startup files. Original driver libraries,
-device nodes, prefix, and startup scripts are not edited.
+已有系统管理权限的终端可直接运行包管理命令。工具按源码哈希创建独立运行目录，打印 FFmpeg 包装器、测试输出和报告位置。可通过 `V2D_NVENC_STATE` 指定存储基目录；动态库路径不能含空白或冒号。
 
-The test explicitly selects CUDA ordinal 0, the single GPU visible on this
-target. It attempts 12-frame H.264 NVENC outputs at 256x256 and 1296x720,
-verifies size/frame count/codec through ffprobe, then decodes every frame on
-the CPU. Logs and `results.json` remain in the build directory. Only `PASS`
-confirms these two short hardware encoding tests; audio, HDR, HEVC, AV1 and
-long video are not covered. A successful compile is not a GPU test.
+测试选择容器可见的 CUDA 索引 `0`，在 256×256 与 1296×720 两个尺寸各编码 12 帧 H.264，检查编码退出状态、尺寸、帧数和编解码器，并完整解码输出。仅 `results.json` 显示 `PASS` 才可进入部署阶段。
 
-## Connect to Frame Interpolation after PASS
+测试不含音轨，也不覆盖 HDR、HEVC、AV1、长视频或完整 ComfyUI 工作流。单独编译成功不能视为 GPU 编码验收。
 
-Obtain the wrapper path using `python nvenc_container.py path`. The helper prints
-only that path on success. Stop the current ComfyUI using its control script,
-then set `DLSS_FFMPEG_PATH` to the wrapper for the new ComfyUI start. Keep
-`DLSS_FFPROBE_PATH=/usr/bin/ffprobe`. The Frame Interpolation node resolves
-these paths when imported, so a restart is required. Select `H.264 (NVIDIA NVENC)`
-and test a short workflow before long work. This setting targets the separate
-`ComfyUI-NVIDIA-DLSS-Frame-Interpolation` node; other nodes may use different
-FFmpeg selection rules.
+## 接入 ComfyUI
 
-To roll back, restart ComfyUI with `DLSS_FFMPEG_PATH=/usr/bin/ffmpeg` and
-`DLSS_FFPROBE_PATH=/usr/bin/ffprobe`, and return to plain `H.264` if NVENC still
-fails. The build/test helper does not change automatic startup configuration.
-Use the explicit deployment step below to persist it.
+工具为使用 `DLSS_FFMPEG_PATH` / `DLSS_FFPROBE_PATH` 的节点提供编码器选择。其中独立的 `ComfyUI-NVIDIA-DLSS-Frame-Interpolation` 节点支持这两个变量；其他节点需核对各自的 FFmpeg 选择规则。
 
-## Persist manual and container startup after PASS
-
-This deployment persists the current CompShare startup configuration.
-`install_nvenc_startup.py` reuses the runtime and matching two-size PASS report;
-it does not rebuild the library, rerun GPU tests, install packages, or change
-NVIDIA driver files. From this repository on the server:
+通过测试后，用报告打印的包装器路径配置启动环境：
 
 ```bash
-/root/miniconda3/bin/python install_nvenc_startup.py \
-  --comfyui "$HOME/ComfyUI" --boot-script /start.d/comfyui.sh
-cd "$HOME/ComfyUI"
-./stop.sh && ./start.sh
+export DLSS_FFMPEG_PATH="/path/to/verified-runtime/ffmpeg"
+export DLSS_FFPROBE_PATH=/usr/bin/ffprobe
 ```
 
-Installation writes four files, after syntax checks and runtime validation:
+重启 ComfyUI 后，在插帧节点选择 `H.264 (NVIDIA NVENC)`，先运行短素材并检查输出。节点导入时会读取编码器路径，因此修改环境后需要重启。
 
-- `~/ComfyUI/start.sh`: loads `comfyui-runtime.json` for every fresh start.
-- `~/ComfyUI/stop.sh`: retains scoped shutdown and works even if the runtime is missing.
-- `~/ComfyUI/comfyui-runtime.json`: persists the two FFmpeg selection variables
-  and runtime fingerprints; no global `LD_PRELOAD`.
-- `/start.d/comfyui.sh`: delegates to `~/ComfyUI/start.sh`, so automatic and
-  manual startup share the same Xvfb, Conda, port and Manager parameters.
+`python nvenc_container.py path` 也可获取路径，但会重新构建运行文件。持久化安装完成后，避免无必要地重建；文件指纹变化时需要重新测试并部署。
 
-The CompShare `/entrypoint.sh` in the user's logs runs `/start.d/*.sh` at container
-startup. The delegate exits after the control script creates the detached
-ComfyUI/Xvfb process. Encoding is available after container restart without
-manually exporting FFmpeg variables. Keep the workflow codec set to
-`H.264 (NVIDIA NVENC)`; persistence does not rewrite saved workflows.
+## 持久化手动与开机启动
 
-Existing files are backed up under `~/ComfyUI/node_backups/nvenc-startup-*`,
-with a manifest identifying each original. Backups remain outside `/start.d`
-so the platform will not execute an old second launch script. Ordinary file
-write failures restore files already changed. Rerunning with identical files
-makes no changes. `--check` validates and prints the plan without writing.
-The installer does not restart ComfyUI itself; the explicit stop/start command
-above does that. The server's real container restart and joint ComfyUI
-DLSSG/NVENC workflow remain target acceptance steps.
+`install_nvenc_startup.py` 复用已有运行文件和匹配的两尺寸 `PASS` 报告，检查来源及文件指纹，然后部署启动文件。它不安装系统包、更换驱动、重建组件或自动重启服务。
 
-At each fresh start, configured paths must exist and be executable; the saved
-wrapper/library fingerprints must match. Missing or changed libraries stop
-startup with a clear message in the boot log rather than selecting an unusable
-encoder. Shutdown is independent of these checks. An explicit per-launch
-`DLSS_FFMPEG_PATH=/usr/bin/ffmpeg` supports temporary CPU rollback, with the
-workflow codec returned to plain `H.264`.
+以下示例适用于平台确实在启动时执行 `/start.d/*.sh` 的容器。其他平台应将 `--boot-script` 指向其实际启动入口，并按平台规则注册执行。
 
-Logs: `~/ComfyUI/comfy.log` for ComfyUI and `/start.d/log/comfyui.log` for the
-platform's boot entry. Config/runtime files must remain on the retained system
-disk; reinstalling the image or replacing storage requires redeployment.
+在节点目录执行，替换 ComfyUI 安装路径：
 
-## Sources and validation
+```bash
+COMFYUI_DIR="/path/to/ComfyUI"
+python install_nvenc_startup.py \
+  --comfyui "$COMFYUI_DIR" \
+  --boot-script /start.d/comfyui.sh \
+  --check
+```
 
-- [NVIDIA device plugin issue #1282](https://github.com/NVIDIA/k8s-device-plugin/issues/1282)
-  includes a user's successful LD_PRELOAD report and a maintainer's discussion.
-- [610.57.04 GPU control header](https://github.com/NVIDIA/open-gpu-kernel-modules/blob/610.57.04/src/common/sdk/nvidia/inc/ctrl/ctrl0000/ctrl0000gpu.h)
-  defines `GET_ATTACHED_IDS` and `GET_PCI_INFO`.
-- `test_nvenc_container.py` exercises synthetic RM calls, ioctl ABI boundaries,
-  the reported broadcast-instance/minor mismatch, opaque IDs,
-  unknown/ambiguous PCI mappings, kernel-error preservation and wrapper scoping.
-  These checks do not execute NVENC or grant access to real GPUs.
+`--check` 仅验证与显示部署计划。确认路径对应部署位置后执行：
+
+```bash
+python install_nvenc_startup.py \
+  --comfyui "$COMFYUI_DIR" \
+  --boot-script /start.d/comfyui.sh
+```
+
+| 文件 | 用途 |
+| --- | --- |
+| ComfyUI 安装目录的 `start.sh` | 新启动时读取持久化 FFmpeg 配置 |
+| ComfyUI 安装目录的 `stop.sh` | 按实例身份停止服务 |
+| ComfyUI 安装目录的 `comfyui-runtime.json` | 保存编码器路径和包装器 / 动态库指纹 |
+| `--boot-script` 指定的入口 | 调用同一份 `start.sh` |
+
+### 设置 Python 解释器
+
+通用部署应显式指定 ComfyUI 的 Python 可执行文件。手动启停使用：
+
+```bash
+export V2D_COMFY_PYTHON="/path/to/comfyui-python"
+"$COMFYUI_DIR/stop.sh" && "$COMFYUI_DIR/start.sh"
+```
+
+开机时不会继承当前终端导出的变量。请在生成的开机入口中、`exec bash` 行之前，设置实际解释器；端口等自定义设置也应在此保存：
+
+```bash
+export V2D_COMFY_PYTHON="/path/to/comfyui-python"
+```
+
+修改后用 `bash -n /path/to/boot-script.sh` 检查语法，并确认平台会执行该入口。重新运行安装器可能重写开机入口，随后应重新核对自定义设置。
+
+### 重启验收
+
+手动启动与容器启动均应检查：
+
+1. 启动日志中的 FFmpeg 路径是否为已验证的包装器。
+2. ComfyUI 是否正常监听配置的端口。
+3. 短工作流是否成功使用 `H.264 (NVIDIA NVENC)`，保存文件是否能完整解码。
+4. 容器重启后再次运行上述检查，确认持久化配置与平台启动入口均生效。
+
+ComfyUI 日志为安装目录中的 `comfy.log`。开机日志位置由平台决定；使用 `/start.d` 的平台请查阅其日志规则。工作流编码器选择仍需保存在工作流中，安装器不改写已有工作流。
+
+## 备份与恢复
+
+已有文件会备份到 ComfyUI 安装目录的 `node_backups/nvenc-startup-*`，清单记录对应原文件。备份位于开机执行目录之外。重复安装相同内容不会重复修改，普通写入失败会恢复已更改的文件。
+
+新启动时包装器与动态库必须存在且指纹一致。缺失或改变会阻止启动并报错；停止服务不依赖运行库校验。
+
+临时返回系统 FFmpeg 时，启动前设置：
+
+```bash
+export DLSS_FFMPEG_PATH=/usr/bin/ffmpeg
+export DLSS_FFPROBE_PATH=/usr/bin/ffprobe
+```
+
+同时将工作流编码器调整为普通 `H.264`。需要完整恢复时按备份清单还原文件；不要将备份启动脚本放入会自动执行的目录。
+
+运行文件和配置需放在容器保留的存储中。镜像重装或替换磁盘后需要重新部署。
+
+## 实现与许可
+
+组件过滤 GPU 枚举响应，使 FFmpeg 使用容器已可访问的设备。它通过 NVIDIA `GET_PCI_INFO` 查询完整 PCI 地址，再匹配系统公开的设备信息；映射不明确时保留原响应。组件不增加 GPU 访问权限。
+
+`nvenc_fix.c` 基于 [flexgrip/nvidia-gpu-enumeration](https://github.com/flexgrip/nvidia-gpu-enumeration) 的固定提交 `1475091ae9e8fb23cc22d565adf932a488d00bcd`，遵循 [GPL-3.0](NVENC_FIX_LICENSE.txt)。NVIDIA 控制接口依据 [GPU 控制头文件](https://github.com/NVIDIA/open-gpu-kernel-modules/blob/610.57.04/src/common/sdk/nvidia/inc/ctrl/ctrl0000/ctrl0000gpu.h)。
+
+相关兼容性讨论见 [NVIDIA device plugin issue #1282](https://github.com/NVIDIA/k8s-device-plugin/issues/1282)。讨论与自动化回归不替代部署环境中的实际编码验证。
