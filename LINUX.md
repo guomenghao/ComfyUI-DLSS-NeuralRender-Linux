@@ -2,13 +2,13 @@
 
 本包新增 Linux x86-64 的 Wine 启动与数据传输适配，Windows 继续直接启动 EXE。原版节点 ID、端口、参数和工作流连接保持兼容。原版 EXE 和 DLSS/NR DLL 均未修改。部署与最新实机问题处理以 [README](README.md) 为准。
 
-**验证范围：本地传输、安装文件与运行库获取测试通过；用户 RTX 5090 / Linux 610.57.04 已通过生产 NR feature 18 探测及原生分辨率单图输出。视频在旧 shader compiler 的光流编译阶段失败，同时确认 stdout 日志混入。新版编译器及文件传输修复仍待实机复测，不能视为完整 Linux 视频 DLSS 已验证版本。**
+**验证范围：本地传输、安装文件与运行库获取测试通过；用户 Ubuntu 24.04 Docker / RTX 5090 / Linux 610.57.04 已通过生产 NR feature 18 探测、原生分辨率单图输出及两帧 SDR 视频处理。新版编译器与文件传输修复后的测试为 PASS：1280×720、2 FPS、2 帧、scale=1、Lucas–Kanade GPU 光流。其他尺寸、放大、HDR、NVOF、音轨、长视频及视觉质量仍待验收，详见 [验证记录](VALIDATION.md)。**
 
 ## 改了什么
 
 - 三个节点统一通过 `wine_runtime.py` 启动程序。Linux 使用 Wine，Windows 直接执行。
 - 图像的输入、输出及 DLL 路径按指定 prefix 的实际 `dosdevices` 盘符映射转为 Windows 路径；支持空格、中文和引号，不经过 shell。
-- 视频继续使用独立的 stdin/stdout 二进制管道；stderr 单独读取。输出不足、输出多余、程序退出失败都会报错。
+- 视频支持独立二进制管道及 Linux 原始帧文件传输；当前自动部署使用文件方式隔离 Wine 日志。输出不足、输出多余、程序退出失败都会报错。
 - 保存的 Wine 配置只传给本节点的工作子进程，不修改 ComfyUI/PyTorch 及其他节点的环境。
 - 整个处理任务有超时保护，默认 1800 秒，可调。超时终止本次 Wine 进程组，不执行 `wineserver -k`。
 - 修复上游 `DLSS NR Runtime Check` 多传一个参数、无法进入程序的错误。
@@ -19,8 +19,8 @@
 
 1. NVIDIA Vulkan、NGX 驱动桥、NVAPI/D3D12 是否可用；仅有 CUDA 不能替代这些组件。
 2. 原版 C++ 程序 `CheckDriverForNr()` 要求 NVIDIA 驱动编号不低于 616.56。它通过 DXGI 的 UMD 版本解码编号，Wine 的报告值可能不满足检查，或无法正确反映 Linux 驱动。此次没有绕过该检查，也不能把 Windows 版本号当作 Linux 驱动安装指令。
-3. NR 的 feature 18 初始化/求值、NVOF 后端及不同 GPU 的运行结果。上游使用直接 NR forwarder 路线，不使用另一个 DLSS 节点的 RenoDX/ReShade 路线；不能把那个仓库的专用 ReShade DLL 当成这里的修复。
-4. 无桌面服务器、Docker、HDR 及视觉质量尚未实机验证。正常启动或 `--help` 返回成功不证明 NR 已执行。
+3. feature 18 已在本记录的 RTX 5090 上通过；NVOF 后端及不同 GPU 的运行结果仍需确认。上游使用直接 NR forwarder 路线，不使用另一个 DLSS 节点的 RenoDX/ReShade 路线；不能把那个仓库的专用 ReShade DLL 当成这里的修复。
+4. 无桌面 Docker 已通过上述短 SDR 样本；HDR、长视频及视觉质量仍未验收。正常启动或 `--help` 返回成功不证明 NR 已执行。
 
 ## 1. 放入 ComfyUI
 

@@ -2,7 +2,7 @@
 
 video2dlssnr v1.4.1 的实验性 Linux/Wine 适配节点，支持 DLSS Super Resolution + Neural Rendering 的图像及视频处理。Windows 仍直接调用上游 EXE。
 
-**状态：RTX 5090 / Linux 610.57.04 已通过 NR feature 18 探测及单图输出；视频在旧编译器的光流阶段失败。新版编译器与文件传输修复仍待实机复测。GitHub CI 验证传输和部署逻辑，不验证 GPU。**
+**状态：2026-10-14，用户的 Ubuntu 24.04 Docker / RTX 5090 / Linux 610.57.04 已通过 NR feature 18 探测、原生分辨率单图输出及两帧 SDR 视频处理。视频结果为 PASS：1280×720、2 FPS、2 帧、scale=1、Lucas–Kanade GPU 光流。放大、HDR、NVOF、音轨、长视频和视觉质量仍待验收。详见 [实机验证记录](VALIDATION.md)。GitHub CI 另行验证真实 Wine 二进制传输，不调用 GPU。**
 
 上游：[DaniilSokolyuk/video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr)。这是独立的社区适配项目，不属于 NVIDIA 官方项目。
 
@@ -20,7 +20,7 @@ video2dlssnr v1.4.1 的实验性 Linux/Wine 适配节点，支持 DLSS Super Res
 
 Ubuntu 24.04、Linux x86-64、Docker、RTX 5090、NVIDIA **610.57.04**。容器应已能通过 `vulkaninfo --summary` 识别真实 NVIDIA GPU，并有配套 `libnvidia-ngx.so`。
 
-自动安装脚本暂时只接受此驱动版本与发行版，遇到其他环境会停止；其他版本需按 [Linux 手动配置说明](LINUX.md) 另行验证。无桌面、容器及 HDR 的真实生成效果仍未验证。
+自动安装脚本暂时只接受此驱动版本与发行版，遇到其他环境会停止；其他版本需按 [Linux 手动配置说明](LINUX.md) 另行验证。无桌面 Docker 下的上述短 SDR 测试已通过，HDR 及其他环境仍需验证。
 
 ## 从 GitHub 安装到当前机器
 
@@ -142,7 +142,7 @@ RTX 5090 / 610.57.04 的实机日志已证明 feature 18 的创建、求值及�
 
 同一日志还证明 Wine/程序诊断进入了 stdout 原始帧通道。新版自动部署在 `linux-runtime.json` 设置 `VIDEO2DLSSNR_VIDEO_TRANSPORT=files`，使用 Wine 内的 cmd 批处理将 stdin、stdout 和 stderr 分别绑定到本次任务的独立文件。整个视频仍由上游 `--nr-video` 一次处理，保留时序处理；不逐帧改用单图，不过滤混合流中的“疑似日志”。完成后检查退出状态与输出字节数，再读取原始帧。Wine 启动器日志单独捕获。
 
-文件方式需要临时磁盘容纳输入和输出 RGBA 帧，结束后自动清理本次临时目录；进度目前在完成时更新。支持普通空格、UTF-8 路径以及参数内的百分号、`&` 和 `!`；Windows 参数不能含双引号或换行，批处理自身所在临时目录还不能含 `%` 或 `!`，必要时设置 `TMPDIR=/tmp`。未配置该选项的 Linux 环境仍默认 `pipe`。新版文件方式及编译器更新通过本地模拟传输验证，**修复后的真实 GPU 视频仍待实机复测**。
+文件方式需要临时磁盘容纳输入和输出 RGBA 帧，结束后自动清理本次临时目录；进度目前在完成时更新。支持普通空格、UTF-8 路径以及参数内的百分号、`&` 和 `!`；Windows 参数不能含双引号或换行，批处理自身所在临时目录还不能含 `%` 或 `!`，必要时设置 `TMPDIR=/tmp`。未配置该选项的 Linux 环境仍默认 `pipe`。新版文件方式及编译器更新已通过上述目标机器的两帧 SDR GPU 视频测试，测试范围见 [验证记录](VALIDATION.md)。
 
 更新后运行 `bash setup_ubuntu24.sh install` 获取约 9.1 MiB 的新 CAB、更新专用配置，再按上一节 `--video-only` 重跑。既有 GE-Proton 和 NVIDIA 大文件校验通过后复用。
 
