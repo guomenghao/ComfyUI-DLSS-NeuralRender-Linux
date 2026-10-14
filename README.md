@@ -215,7 +215,7 @@ cd "$HOME/ComfyUI"
 
 ## 可选：容器内 NVENC 编码修复
 
-当原生 FFmpeg 返回 `OpenEncodeSessionEx: unsupported device (2)` 时，可按 [NVENC_CONTAINER.md](NVENC_CONTAINER.md) 尝试仅对 FFmpeg 启用 GPU 枚举修复。保留当前驱动，先实际编码和解码测试，通过后再接入插帧节点。该方案仍待目标机器验证；源码编译和 CI 不代表 GPU 编码成功。
+当原生 FFmpeg 返回 `OpenEncodeSessionEx: unsupported device (2)` 时，可按 [NVENC_CONTAINER.md](NVENC_CONTAINER.md) 尝试仅对 FFmpeg 启用 GPU 枚举修复。保留当前驱动，先实际编码和解码测试，通过后再接入插帧节点。2026-10-14，目标 Ubuntu 24.04 Docker / RTX 5090 / 610.57.04 已通过修正版的 256×256、1296×720 两个短 H.264 NVENC 编码及完整解码测试。ComfyUI 内联合 DLSSG + NVENC、音轨、HDR、其他编码器及长视频仍待验证；实机结果与 CI 分开记录。
 
 ## Windows
 

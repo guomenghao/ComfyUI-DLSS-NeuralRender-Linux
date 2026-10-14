@@ -4,7 +4,13 @@ This is a separate experimental workaround for native Linux FFmpeg. It does
 not run FFmpeg through Wine. Keep the existing NVIDIA driver and Wine setup.
 The target user's 610.57.04 container loads matching CUDA/NVENC/NVDEC libraries
 and NVENC API 13.1, but `OpenEncodeSessionEx` returns unsupported device (2).
-GPU H.264 encoding with this workaround remains **unverified on that target**.
+The revised PCI mapping passed the user's actual H.264 NVENC test on this
+Ubuntu 24.04 x86_64 Docker / RTX 5090 / Linux 610.57.04 target on 2026-10-14.
+Both 256x256 and 1296x720 outputs contained 12 H.264 frames, encoder exit code
+0, and all frames decoded successfully. The source SHA-256 was
+`4b068c35c74f2ee62a175cbad46d79d11138eeecd6aa1fa24a581a06c500e687`.
+This confirms two short standalone GPU encoding tests. Joint DLSSG + NVENC
+execution inside ComfyUI, audio, HDR, HEVC, AV1 and long video remain pending.
 The same target has already passed short native DLSSG interpolation with CPU
 H.264 encoding at 1296x720, 30 to 60 FPS, 12 input and 24 output frames.
 
@@ -35,7 +41,12 @@ minor 2 belonged to PCI `0000:94:00.0`, GPU ID `0x9400`. The shim mistakenly
 retained `0x6a00`, causing CUDA initialization to return `CUDA_ERROR_NO_DEVICE`
 in the scoped FFmpeg process. The revised shim uses `GET_PCI_INFO` and a
 regression reproduces this eight-GPU ordering, including duplicate bus numbers
-across PCI domains. Real GPU acceptance of the revised code remains pending.
+across PCI domains. The revised source has now passed both standalone H.264 GPU encoding tests:
+logs show correct retention of GPU ID `0x9400`, PCI `0000:94:00`, Linux minor
+2, filtering the host list from eight IDs to the one accessible GPU. FFmpeg
+reports `h264_nvenc`, both 12-frame files were decoded, and `results.json`
+reports `PASS`. These are user-provided target results, separate from CI.
+Raw host logs, host identifiers, and GPU UUIDs are not published.
 
 ## Build and run the GPU test
 
