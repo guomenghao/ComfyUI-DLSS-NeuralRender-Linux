@@ -19,8 +19,21 @@ mkdir -p "$state_dir"
 exec > >(tee -a "$state_dir/$mode.log") 2>&1
 trap 'printf "FAILED at setup line %s. Log: %s/%s.log\n" "$LINENO" "$state_dir" "$mode"' ERR
 [[ "$(uname -m)" == x86_64 ]] || { printf 'Requires Linux x86-64\n'; exit 1; }
-driver_version="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 | tr -d '[:space:]')"
-[[ "$driver_version" == 610.57.04 ]] || { printf 'Driver is %s, expected 610.57.04; no changes made.\n' "$driver_version"; exit 1; }
+gpu_info="$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader)"
+gpu_match=0
+while IFS=',' read -r gpu_name driver_version; do
+    gpu_name="${gpu_name# }"
+    gpu_name="${gpu_name% }"
+    driver_version="${driver_version//[[:space:]]/}"
+    if [[ "$gpu_name" == 'NVIDIA GeForce RTX 5090' && "$driver_version" == 610.57.04 ]]; then
+        gpu_match=1
+        break
+    fi
+done <<< "$gpu_info"
+if [[ "$gpu_match" != 1 ]]; then
+    printf 'This profile requires RTX 5090 / 610.57.04. Detected:\n%s\nNo system packages changed.\n' "$gpu_info"
+    exit 1
+fi
 if [[ "$mode" == test ]]; then
     cd "$node_dir"
     printf '%s\n' 'TEST 1/3: Wine worker --help (no DLSS evaluation).'
@@ -83,7 +96,8 @@ fetch 'https://download.nvidia.com/XFree86/Linux-x86_64/610.57.04/NVIDIA-Linux-x
     'b2e935c66b83bb00c0c857bc8e0ee0fd52de9286b40c9cc1eec29a7ce7eb116d'
 driver_dir="$state_dir/runtime/NVIDIA-Linux-x86_64-610.57.04"
 if [[ ! -f "$state_dir/runtime/.driver-extracted" ]]; then
-    sh "$state_dir/downloads/NVIDIA-Linux-x86_64-610.57.04.run" --extract-only --target "$driver_dir"
+    "$py_exec" -u "$kit_dir/configure_local.py" extract-driver \
+        --archive "$state_dir/downloads/NVIDIA-Linux-x86_64-610.57.04.run" --target "$driver_dir"
     touch "$state_dir/runtime/.driver-extracted"
 fi
 printf '%s\n' 'STEP 4/5: Microsoft native x64 shader compiler 10.0.28000.2705.'

@@ -24,6 +24,7 @@ See LINUX.md for prefix, graphics libraries, and acceptance tests.
 """
 
 import glob
+import math
 from collections import deque
 import os
 import re
@@ -88,13 +89,24 @@ def nr_args(style, preset, intensity, local_structure, local_tone, skin, detail,
 def probe_transfer(video):
     """'pq' / 'hlg' when the VIDEO input's source stream is tagged HDR, else None.
 
-    Load Video hands frames over as coded values (PQ / HLG code in a float tensor) without saying
-    which curve they are on; the stream itself still knows. Opened read-only with PyAV, which
-    ComfyUI ships; anything that fails means "treat as SDR"."""
+    Prefer ComfyUI metadata, including in-memory VIDEO inputs. Older APIs fall
+    back to PyAV stream tags. A failed legacy probe requires an explicit HDR
+    override rather than silently treating an unknown stream as SDR.
+    """
+    get_color_space = getattr(video, "get_color_space", None)
+    if callable(get_color_space):
+        color = get_color_space()
+        if color in {"sRGB", "HDR PQ", "HDR"}:
+            return {"sRGB": None, "HDR PQ": "pq", "HDR": "hlg"}[color]
+        raise RuntimeError(f"Unknown VIDEO color space {color!r}; select hdr_source explicitly.")
     try:
         src = video.get_stream_source()
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError("Cannot detect VIDEO transfer; select hdr_source explicitly.") from exc
+    try:
+        position = src.tell() if hasattr(src, "tell") else None
+    except (OSError, ValueError):
+        position = None
     try:
         import av
         if hasattr(src, "seek"):
@@ -104,21 +116,25 @@ def probe_transfer(video):
             trc = getattr(stream.codec_context, "color_trc", None)
             if trc is None:
                 trc = getattr(stream, "color_trc", None)
+            if trc is None:
+                return None
             name = getattr(trc, "name", None)
             key = str(name).lower().replace("_", "-") if name else int(trc)
             return TRC_TO_TRANSFER.get(key)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError("Cannot read VIDEO transfer tags; select hdr_source explicitly.") from exc
     finally:
         try:
-            if hasattr(src, "seek"):
-                src.seek(0)
+            if position is not None and hasattr(src, "seek"):
+                src.seek(position)
         except Exception:
             pass
 
 
 def resolve_transfer(hdr_source, video):
     """The tool's --nr-transfer for this job: None for SDR."""
+    if hdr_source not in HDR_SOURCES:
+        raise ValueError("hdr_source must be auto, sdr, pq or hlg")
     if hdr_source == "auto":
         return probe_transfer(video) if video is not None else None
     return None if hdr_source == "sdr" else hdr_source
@@ -127,6 +143,10 @@ def resolve_transfer(hdr_source, video):
 def out_dims(in_w, in_h, width, scale, height=0):
     """Output size the way nr_video.py computes it: width and height together pin the exact size,
     one of them keeps the aspect, else scale; even dims."""
+    if (in_w <= 0 or in_h <= 0 or not math.isfinite(scale) or scale <= 0
+            or width < 0 or height < 0 or not math.isfinite(width) or not math.isfinite(height)
+            or int(width) != width or int(height) != height):
+        raise ValueError("Input dimensions and scale must be positive; width/height must be nonnegative integers.")
     if width > 0 and height > 0:
         out_w, out_h = int(width), int(height)
     elif width > 0:
@@ -140,9 +160,43 @@ def out_dims(in_w, in_h, width, scale, height=0):
 
 # ----------------------------------------------------------------------------- numpy cores
 
+def check_comfy_cancelled():
+    try:
+        from comfy.model_management import throw_exception_if_processing_interrupted
+    except ImportError:
+        return
+    throw_exception_if_processing_interrupted()
+
+
+def cancellation_settings():
+    try:
+        from comfy import model_management as mm
+    except ImportError:
+        return {}
+
+    def cancel_error():
+        # Consume ComfyUI's interruption flag on the execution thread, never
+        # from the monitor; another worker may have already consumed the flag.
+        mm.throw_exception_if_processing_interrupted()
+        return mm.InterruptProcessingException()
+
+    return {"cancel_check": mm.processing_interrupted, "cancel_error": cancel_error}
+
+
+def validate_frames(frames, ndim, transfer=None):
+    if (not isinstance(frames, np.ndarray) or frames.ndim != ndim or frames.shape[-1] != 3
+            or any(size <= 0 for size in frames.shape[:-1])
+            or frames.dtype not in (np.dtype("uint8"), np.dtype("uint16"))):
+        raise ValueError("Frames must be nonempty RGB arrays with uint8 (SDR) or uint16 (HDR) pixels.")
+    if transfer not in (None, "pq", "hlg") or (frames.dtype == np.uint16) != bool(transfer):
+        raise ValueError("HDR frames must be uint16 with pq/hlg transfer; SDR frames uint8 without a transfer.")
+
 def run_image_np(img_u8, width, scale, nr, exe, adapter=0, height=0):
     """One uint8 RGB [H,W,3] image through --nr-run; returns uint8 RGB [H',W',3]."""
     from PIL import Image
+    validate_frames(img_u8, 3)
+    out_dims(img_u8.shape[1], img_u8.shape[0], width, scale, height)
+    check_comfy_cancelled()
     tmp = tempfile.mkdtemp(prefix="v2d_")
     try:
         src = os.path.join(tmp, "in.png")
@@ -156,9 +210,9 @@ def run_image_np(img_u8, width, scale, nr, exe, adapter=0, height=0):
         if width <= 0 and height <= 0 and abs(scale - 1.0) > 1e-6:
             cmd += ["--nr-scale", f"{scale}"]
         p = RuntimeProcess(exe, cmd[1:], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           text=True, encoding="utf-8", errors="replace")
+                           text=True, encoding="utf-8", errors="replace", **cancellation_settings())
         try:
-            stdout, stderr = p.communicate()
+            stdout, stderr = p.collect_output()
             p.check_timeout()
             hits = glob.glob(os.path.join(out_dir, "*_nr.png"))
             if p.returncode != 0 or not hits:
@@ -166,7 +220,8 @@ def run_image_np(img_u8, width, scale, nr, exe, adapter=0, height=0):
                                    + ((stdout or "") + (stderr or ""))[-3000:])
         finally:
             p.close_worker()
-        return np.array(Image.open(hits[0]).convert("RGB"), dtype=np.uint8)
+        with Image.open(hits[0]) as image:
+            return np.array(image.convert("RGB"), dtype=np.uint8)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -201,20 +256,26 @@ def _batch_quote(value):
     return '"' + value.replace('%', '%%') + '"'
 
 
-def run_video_files(cmd, rgba, out_w, out_h, dtype, progress=None, log=None):
+def run_video_files(cmd, frames, out_w, out_h, dtype, progress=None, log=None):
     """Windows cmd redirects raw frames to private files, isolating Wine logs."""
     env, _ = worker_settings()
     prefix = Path(env["WINEPREFIX"]).expanduser()
-    need = len(rgba) * out_w * out_h * (8 if dtype == np.uint16 else 4)
+    b, h, w, _ = frames.shape
+    need = b * out_w * out_h * 4 * frames.dtype.itemsize
     with tempfile.TemporaryDirectory(prefix="v2d_video_") as temp:
         root = Path(temp)
         input_path, output_path, stderr_path = (root / leaf for leaf in
                                                ("input.rgba", "output.rgba", "worker.stderr"))
-        if shutil.disk_usage(root).free < rgba.nbytes + need:
+        if shutil.disk_usage(root).free < b * h * w * 4 * frames.dtype.itemsize + need:
             raise RuntimeError("Wine file transport needs free temporary disk space for input and output frames.")
         with input_path.open("wb") as stream:
-            for frame in rgba:
-                stream.write(frame.tobytes())
+            scratch = np.empty((h, w, 4), dtype=dtype)
+            scratch[..., 3] = 65535 if dtype == np.uint16 else 255
+            for frame in frames:
+                check_comfy_cancelled()
+                scratch[..., :3] = frame
+                stream.write(scratch.tobytes())
+            del scratch
         win_args = [windows_path(str(cmd[0]), prefix), *cmd[1:]]
         # nr-video has no host path flags; raw files are redirected by cmd.exe.
         redirect = (" <" + _batch_quote(windows_path(str(input_path), prefix)) +
@@ -232,10 +293,10 @@ def run_video_files(cmd, rgba, out_w, out_h, dtype, progress=None, log=None):
         # Manually embedding quotes becomes literal \"...\" in Wine cmd.exe.
         p = RuntimeProcess(cmd[0], ["/d", "/c", batch_win],
                            program="cmd.exe", stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, **cancellation_settings())
         diagnostics = ""
         try:
-            stdout, stderr = p.communicate()
+            stdout, stderr = p.collect_output(limit=16384)
             # Wine/Unix logs are outside the raw frame file. Preserve bounded
             # diagnostics even if the launcher merges its own stdout/stderr.
             diagnostics = ((stdout or b"") + (stderr or b""))[-16384:].decode("utf-8", "replace")
@@ -254,12 +315,19 @@ def run_video_files(cmd, rgba, out_w, out_h, dtype, progress=None, log=None):
                                    f"got {got}/{need} bytes)\n" + diagnostics[-16384:])
             if progress:
                 try:
-                    progress(len(rgba))
+                    progress(b)
                 except Exception as exc:
                     if log is not None:
                         log.append(f"Progress callback failed: {exc}")
-            data = np.fromfile(output_path, dtype=dtype)
-            return data.reshape(len(rgba), out_h, out_w, 4)[..., :3]
+            result = np.empty((b, out_h, out_w, 3), dtype=dtype)
+            with output_path.open("rb") as stream:
+                for index in range(b):
+                    check_comfy_cancelled()
+                    data = np.fromfile(stream, dtype=dtype, count=out_h * out_w * 4)
+                    if data.size != out_h * out_w * 4:
+                        raise RuntimeError("Worker output was truncated while reading frames.")
+                    result[index] = data.reshape(out_h, out_w, 4)[..., :3]
+            return result
         finally:
             p.close_worker()
 
@@ -273,10 +341,12 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
     the frame count as the tool reports it; `log`, if a list, receives the tool's non-progress
     stderr lines (backend in use, final tally, any warnings).
     """
+    validate_frames(frames, 4, transfer)
+    check_comfy_cancelled()
     b, h, w, _ = frames.shape
     wide = frames.dtype == np.uint16
-    if bool(transfer) != wide:
-        raise ValueError("HDR frames must be uint16 with a transfer, SDR frames uint8 without")
+    if engine not in ENGINES or not math.isfinite(sdr_white) or sdr_white <= 0:
+        raise ValueError("Invalid motion engine or SDR white luminance.")
     out_w, out_h = out_dims(w, h, width, scale, height)
     cmd = [exe, "--nr-video", "--nr-in", f"{w}x{h}", "--adapter", str(adapter)] + nr + [
         "--nr-motion", "1" if motion else "0", "--nr-motion-engine", engine]
@@ -287,38 +357,37 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
     if (out_w, out_h) != (w, h):  # exact even dims so the tool and this reader agree
         cmd += ["--nr-width", str(out_w), "--nr-height", str(out_h)]
 
-    alpha = np.full((b, h, w, 1), 65535 if wide else 255, frames.dtype)
-    rgba = np.concatenate([frames, alpha], axis=3)
     bpp = 8 if wide else 4
 
-    if b == 0:
-        raise ValueError("Video batch must contain at least one frame.")
     if sys.platform == "linux":
         env, _ = worker_settings()
         transport = env.get("VIDEO2DLSSNR_VIDEO_TRANSPORT", "pipe")
         if transport not in {"pipe", "files"}:
             raise ValueError("VIDEO2DLSSNR_VIDEO_TRANSPORT must be pipe or files.")
         if transport == "files":
-            return run_video_files(cmd, rgba, out_w, out_h, frames.dtype, progress, log)
+            return run_video_files(cmd, frames, out_w, out_h, frames.dtype, progress, log)
     need = b * out_w * out_h * bpp
     buf = bytearray(need)
     view = memoryview(buf)
     got = 0
     p = RuntimeProcess(exe, cmd[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE)
+                       stderr=subprocess.PIPE, **cancellation_settings())
     err = deque(maxlen=100)
 
     def feed():
         try:
+            scratch = np.empty((h, w, 4), dtype=frames.dtype)
+            scratch[..., 3] = 65535 if wide else 255
             for i in range(b):
-                p.stdin.write(rgba[i].tobytes())
+                scratch[..., :3] = frames[i]
+                p.stdin.write(scratch.tobytes())
             p.stdin.close()
         except (BrokenPipeError, OSError):
             pass
 
     def drain():
         prog = re.compile(rb"^NRPROG (\d+) ")
-        for raw in iter(p.stderr.readline, b""):
+        for raw in iter(lambda: p.stderr.readline(8192), b""):
             m = prog.match(raw)
             if m:
                 if progress:
@@ -357,9 +426,7 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
         diagnostics = "\n".join(err)[-3000:]
         if preview:
             diagnostics += "\n" + preview
-        if p.timed_out.is_set():
-            raise RuntimeError(f"video2dlssnr timed out after {p.timeout_seconds:g}s "
-                               f"(got {got}/{need} bytes)\n" + diagnostics)
+        p.check_timeout()
         if extra:
             raise RuntimeError("Unexpected extra stdout bytes: binary frame stream was "
                                "polluted or the worker returned extra frames.\n" + diagnostics)
@@ -379,12 +446,14 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
 
 def to_u8(t):
     """ComfyUI IMAGE [B,H,W,C] float 0..1 -> uint8 RGB [B,H,W,3]."""
+    validate_tensor(t)
     x = t.detach().cpu().clamp(0, 1).mul(255).round().to(torch.uint8).numpy()
     return np.ascontiguousarray(x[..., :3])
 
 
 def to_u16(t):
     """ComfyUI IMAGE [B,H,W,C] float 0..1 (PQ / HLG code values) -> uint16 RGB [B,H,W,3]."""
+    validate_tensor(t)
     x = t.detach().cpu().clamp(0, 1).mul(65535).round().to(torch.int32).numpy().astype(np.uint16)
     return np.ascontiguousarray(x[..., :3])
 
@@ -392,6 +461,11 @@ def to_u16(t):
 def to_tensor(arr):
     full = 65535.0 if arr.dtype == np.uint16 else 255.0
     return torch.from_numpy(np.ascontiguousarray(arr).astype(np.float32) / full)
+
+
+def validate_tensor(t):
+    if not isinstance(t, torch.Tensor) or t.ndim != 4 or t.shape[-1] < 3 or any(size <= 0 for size in t.shape):
+        raise ValueError("IMAGE input must contain nonempty [batch, height, width, RGB] frames.")
 
 
 def make_video(images, audio, frame_rate, transfer=None):
@@ -404,14 +478,16 @@ def make_video(images, audio, frame_rate, transfer=None):
     try:
         from comfy_api.input_impl import VideoFromComponents
         from comfy_api.util import VideoComponents
-    except Exception:
+    except ImportError as exc:
+        if transfer:
+            raise RuntimeError("HDR VIDEO output requires a current ComfyUI with HDR support.") from exc
         return None
     comps = VideoComponents(images=images, audio=audio, frame_rate=frame_rate)
     if transfer:
         try:
             return VideoFromComponents(comps, bit_depth=10, color_space=COMFY_COLOR_SPACE[transfer])
-        except TypeError:  # an older ComfyUI without HDR video: the frames are still right
-            pass
+        except TypeError as exc:
+            raise RuntimeError("This ComfyUI version cannot preserve HDR VIDEO metadata; update ComfyUI.") from exc
     return VideoFromComponents(comps)
 
 
@@ -536,6 +612,12 @@ class DLSSNRVideo:
             raise RuntimeError("Connect a VIDEO (Load Video) or an IMAGE batch (e.g. VHS Load Video).")
         if frame_rate is None:  # an IMAGE batch carries no rate; this only labels the VIDEO output
             frame_rate = Fraction(images_fps).limit_denominator(1000)
+        if not math.isfinite(float(frame_rate)) or frame_rate <= 0:
+            raise ValueError("Video frame rate must be positive and finite.")
+        validate_tensor(images)
+        # Check output API support before running a costly GPU job.
+        if make_video(images, audio, frame_rate, transfer) is None and video is not None:
+            raise RuntimeError("VIDEO input/output requires a current ComfyUI version.")
 
         exe = find_exe()
         nr = nr_args(style, preset, intensity, local_structure, local_tone, skin,

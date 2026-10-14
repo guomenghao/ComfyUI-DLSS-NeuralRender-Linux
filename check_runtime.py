@@ -32,7 +32,7 @@ def main():
             worker = RuntimeProcess(exe, flags, stdout=-1, stderr=-1,
                                     text=True, encoding="utf-8", errors="replace")
             try:
-                stdout, stderr = worker.communicate()
+                stdout, stderr = worker.collect_output()
                 worker.check_timeout()
                 print(stdout or "", end="")
                 print(stderr or "", end="", file=sys.stderr)

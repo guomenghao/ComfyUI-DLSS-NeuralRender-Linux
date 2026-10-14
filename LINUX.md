@@ -7,10 +7,10 @@
 ## 改了什么
 
 - 三个节点统一通过 `wine_runtime.py` 启动程序。Linux 使用 Wine，Windows 直接执行。
-- 图像的输入、输出及 DLL 路径按指定 prefix 的实际 `dosdevices` 盘符映射转为 Windows 路径；支持空格、中文和引号，不经过 shell。
+- 图像的输入、输出及 DLL 路径按指定 prefix 的实际 `dosdevices` 盘符映射转为 Windows 路径；作为独立参数传递，不经过 Unix shell。视频文件方式另有批处理参数限制，见 README。
 - 视频支持独立二进制管道及 Linux 原始帧文件传输；当前自动部署使用文件方式隔离 Wine 日志。输出不足、输出多余、程序退出失败都会报错。
 - 保存的 Wine 配置只传给本节点的工作子进程，不修改 ComfyUI/PyTorch 及其他节点的环境。
-- 整个处理任务有超时保护，默认 1800 秒，可调。超时终止本次 Wine 进程组，不执行 `wineserver -k`。
+- 整个工作程序有超时保护，可调。无本机配置时默认 1800 秒，自动安装首次写入 600 秒；再次配置保留已有超时。取消与超时终止本次 Wine 进程组，不执行 `wineserver -k`。
 - 修复上游 `DLSS NR Runtime Check` 多传一个参数、无法进入程序的错误。
 
 ## 实机上仍可能卡在哪里
@@ -168,7 +168,7 @@ python check_runtime.py --probe-nr --adapter 0
 
 无桌面调用设置 `VIDEO2DLSSNR_XVFB=1`，每个 Wine 工作进程单独由 `xvfb-run` 启动。需要 `xvfb` 和 `xauth`；`WINE_GRAPHICS_DRIVER=x11` 也可保存进本节点配置。Xvfb 满足 Wine 的显示连接，DLSS 仍使用筛选后的 NVIDIA GPU。该支持已通过模拟包装器的管道回归测试，真实容器结果需运行部署包的 `test` 验收。
 
-当前代码共有 13 项传输/配置回归测试；其中新增两项验证 Xvfb 包装后的二进制流和缺少包装器时的错误处理。
+回归范围包括 SDR/HDR 传输、路径、Xvfb、超时、取消、进程清理、日志上限、HDR 元数据、非法输入和安装恢复；复查证据见 [CODE_REVIEW.md](CODE_REVIEW.md)。真实 Wine 测试需在有 Wine/Xvfb/MinGW 的 Linux 环境设置 `V2D_TEST_REAL_WINE=1`，GitHub CI 已配置该步骤。
 
 ```bash
 python -m unittest discover -s . -p 'test_*.py' -v

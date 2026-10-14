@@ -41,18 +41,18 @@ def _timeout(value: object) -> float:
 
 def worker_settings() -> tuple[dict[str, str], float]:
     env = os.environ.copy()
-    seconds = _timeout(env.get("VIDEO2DLSSNR_TIMEOUT", "1800"))
+    seconds = env.get("VIDEO2DLSSNR_TIMEOUT", "1800")
     if sys.platform != "linux":
-        return env, seconds
+        return env, _timeout(seconds)
     try:
         raw = CONFIG_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return env, seconds
+        return env, _timeout(seconds)
     except OSError as exc:
         raise RuntimeError(f"Cannot read {CONFIG_PATH}: {exc}") from exc
     try:
         cfg = json.loads(raw)
-        if not isinstance(cfg, dict) or cfg.get("version") != 1:
+        if not isinstance(cfg, dict) or type(cfg.get("version")) is not int or cfg["version"] != 1:
             raise ValueError("expected version 1")
         if set(cfg) - {"version", "environment", "timeout_seconds"}:
             raise ValueError("unknown config fields")
@@ -159,10 +159,15 @@ def launch_spec(exe: str, args: list[str], *, program: str | None = None) -> tup
 class RuntimeProcess(subprocess.Popen):
     """Bound the whole job, including stalled reads, and own only its process group."""
 
-    def __init__(self, exe: str, args: list[str], *, program: str | None = None, **kwargs):
+    def __init__(self, exe: str, args: list[str], *, program: str | None = None,
+                 cancel_check=None, cancel_error=None, **kwargs):
         command, options, self.timeout_seconds = launch_spec(exe, args, program=program)
         self._owns_group = bool(options.get("start_new_session"))
         self.timed_out = threading.Event()
+        self.cancelled = threading.Event()
+        self._stop_monitor = threading.Event()
+        self._cancel_error = cancel_error
+        self._monitor_error = None
         self._timeout_lock = threading.Lock()
         self._closed = False
         try:
@@ -172,6 +177,23 @@ class RuntimeProcess(subprocess.Popen):
         self._timer = threading.Timer(self.timeout_seconds, self._on_timeout)
         self._timer.daemon = True
         self._timer.start()
+        if cancel_check is not None:
+            self._monitor = threading.Thread(target=self._watch_cancel, args=(cancel_check,), daemon=True)
+            self._monitor.start()
+
+    def _watch_cancel(self, check):
+        while not self._stop_monitor.wait(0.1):
+            try:
+                cancelled = check()
+            except Exception as exc:
+                self._monitor_error = exc
+                cancelled = True
+            if cancelled:
+                with self._timeout_lock:
+                    if not self._closed:
+                        self.cancelled.set()
+                        self.abort()
+                return
 
     def _on_timeout(self):
         with self._timeout_lock:
@@ -190,14 +212,56 @@ class RuntimeProcess(subprocess.Popen):
             pass
 
     def check_timeout(self):
+        if self._monitor_error is not None:
+            raise RuntimeError("Cannot check ComfyUI task cancellation") from self._monitor_error
+        if self.cancelled.is_set():
+            if self._cancel_error is not None:
+                raise self._cancel_error()
+            raise RuntimeError("video2dlssnr task cancelled.")
         if self.timed_out.is_set():
             raise RuntimeError(f"video2dlssnr timed out after {self.timeout_seconds:g}s. See Wine/NGX logs; VIDEO2DLSSNR_TIMEOUT can be increased for long jobs.")
+
+    def collect_output(self, limit=65536):
+        """Drain both diagnostic pipes concurrently, retaining a bounded tail.
+
+        Only for jobs whose input is inherited or DEVNULL. Frame pipes use their
+        own reader/writer; communicate() would retain unlimited diagnostic data.
+        """
+        if self.stdin is not None or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("collect_output requires no stdin pipe and a positive tail limit")
+        empty = "" if self.text_mode else b""
+        tails = [empty, empty]
+        errors = []
+
+        def drain(index, stream):
+            if stream is None:
+                return
+            try:
+                for chunk in iter(lambda: stream.read(8192), empty):
+                    tails[index] = (tails[index] + chunk)[-limit:]
+            except (OSError, ValueError) as exc:
+                errors.append(exc)
+                self.abort()
+
+        threads = [threading.Thread(target=drain, args=(index, stream), daemon=True)
+                   for index, stream in enumerate((self.stdout, self.stderr))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()  # timeout/cancellation also kills descendants holding these pipes
+        self.wait()
+        if errors:
+            self.check_timeout()
+            raise RuntimeError("Cannot read video2dlssnr diagnostic output") from errors[0]
+        return tuple(tails)
 
     def close_worker(self):
         with self._timeout_lock:
             self._closed = True
             self._timer.cancel()
-        if self.poll() is None:
+            self._stop_monitor.set()
+        # A parent can already have exited while its children are still alive.
+        if self._owns_group or self.poll() is None:
             self.abort()
         self.wait(timeout=5)
         for stream in (self.stdin, self.stdout, self.stderr):

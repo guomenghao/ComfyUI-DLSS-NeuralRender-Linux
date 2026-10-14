@@ -5,6 +5,8 @@ import os
 import sys
 import tempfile
 import textwrap
+import threading
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -223,6 +225,49 @@ class WineTransportTests(unittest.TestCase):
                     self.assertEqual(progress, [2])
                     self.assertIn("launcher diagnostics", "\n".join(logs))
                     self.assertIn("fake Wine diagnostic", "\n".join(logs))
+
+    def test_file_transport_uses_frame_sized_scratch_and_returns_owned_rgb(self):
+        original_fromfile = np.fromfile
+        counts = []
+        def read_frame(*args, **kwargs):
+            counts.append(kwargs.get("count", -1))
+            return original_fromfile(*args, **kwargs)
+        with patch.dict(os.environ, {"VIDEO2DLSSNR_VIDEO_TRANSPORT": "files"}), patch.object(
+                nodes.np, "concatenate", side_effect=AssertionError("whole-clip RGBA copy")), patch.object(
+                nodes.np, "fromfile", side_effect=read_frame):
+            result = nodes.run_video_np(self.frames(), 0, 1, [], True, "lk", False, str(self.files_exe))
+        np.testing.assert_array_equal(result, self.frames())
+        self.assertEqual(counts, [4 * 6 * 4, 4 * 6 * 4])
+        self.assertTrue(result.flags.owndata)
+        self.assertTrue(result.flags.c_contiguous)
+
+    def test_comfy_cancellation_reaches_image_pipe_and_file_workers(self):
+        class Interrupted(BaseException):
+            pass
+        requested = threading.Event()
+        def throw():
+            if requested.is_set():
+                requested.clear()
+                raise Interrupted()
+        comfy = types.ModuleType("comfy")
+        mm = types.SimpleNamespace(processing_interrupted=requested.is_set,
+            throw_exception_if_processing_interrupted=throw, InterruptProcessingException=Interrupted)
+        comfy.model_management = mm
+        modules = {"comfy": comfy, "comfy.model_management": mm}
+        for mode in ("image", "pipe", "files"):
+            with self.subTest(mode=mode), patch.dict(sys.modules, modules), patch.dict(os.environ, {
+                    "TEST_WORKER_MODE": "hang", "VIDEO2DLSSNR_VIDEO_TRANSPORT": mode if mode != "image" else "pipe"}):
+                timer = threading.Timer(0.2, requested.set)
+                timer.start()
+                try:
+                    with self.assertRaises(Interrupted):
+                        if mode == "image":
+                            nodes.run_image_np(self.frames()[0], 0, 1, [], str(self.exe))
+                        else:
+                            nodes.run_video_np(self.frames(), 0, 1, [], True, "lk", False, str(self.files_exe))
+                finally:
+                    timer.cancel()
+                    requested.clear()
 
     def test_file_transport_rejects_short_extra_and_failure(self):
         for mode in ["short", "extra", "fail"]:

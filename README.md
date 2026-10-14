@@ -6,13 +6,15 @@ video2dlssnr v1.4.1 的实验性 Linux/Wine 适配节点，支持 DLSS Super Res
 
 上游：[DaniilSokolyuk/video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr)。这是独立的社区适配项目，不属于 NVIDIA 官方项目。
 
+2026-10-14 的源码复查、已修复的问题和仍需实机验证的范围见 [代码复查报告](CODE_REVIEW.md)。
+
 ## 功能和边界
 
 - 保留上游三个节点及原有 ID：`DLSSNR_Image`、`DLSSNR_Video`、`DLSSNR_RuntimeInfo`。
 - Linux 的工作程序通过 Wine 启动；ComfyUI、PyTorch 和视频编码仍原生运行。
 - 按实际 Wine 盘符转换图像路径；SDR 8-bit 和 HDR 16-bit 支持二进制管道及 Linux 专用原始帧文件传输。当前自动部署使用文件方式隔离 Wine 日志与帧数据，Windows 继续使用管道。
 - 无桌面环境可用 Xvfb 包装每次调用，明确筛选 NVIDIA GPU；只有工作子进程使用专用配置。
-- 提供进程超时和独立进程组清理，修复上游 Runtime Check 的参数数量错误。
+- 提供进程超时、ComfyUI 任务取消检测和独立进程组清理；工作程序日志只保留有限尾部，修复上游 Runtime Check 的参数数量错误。
 - 不增加视频帧数，不修改或伪造 NVIDIA 驱动版本，不修改上游 EXE/DLL。
 - Git 仓库只保存源码。运行库按固定发布资产和 SHA-256 从上游下载。
 
@@ -57,7 +59,7 @@ bash setup_ubuntu24.sh install
 3. 下载并校验 GE-Proton11-6 x86_64，使用其配套 Wine、DXVK、VKD3D-Proton、DXVK-NVAPI。
 4. 校验 NVIDIA 610.57.04 `.run` 包，仅 `--extract-only` 解压匹配的 `_nvngx.dll`，不运行 `nvidia-installer`，不安装 NVIDIA apt 包或替换宿主机驱动。
 5. 从微软 SDK CAB 获取并校验原生 x64 shader compiler **10.0.28000.2705**，建立受本项目标记的专用 prefix。旧版 6.3.9600 编译器不适用于本节点的多分量 UAV 光流着色器。
-6. 备份已有本机配置及驱动桥，写入 `linux-runtime.json`，每次 Wine 调用使用 Xvfb，GPU 选择 RTX 5090。
+6. 备份已有本机配置及驱动桥，写入 `linux-runtime.json`，每次 Wine 调用使用 Xvfb，GPU 选择 RTX 5090。首次设置 600 秒超时；重跑安装保留已有 `timeout_seconds`，其他环境字段按本部署方案重新生成。
 
 需要下载超过 1 GB 的运行文件及依赖，安装前预留至少 8 GiB 空间。所有配置与下载状态默认保存在：
 

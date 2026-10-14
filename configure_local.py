@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -69,6 +70,22 @@ def validate_prefix(prefix):
         raise RuntimeError(f"Refusing existing unmanaged prefix: {prefix}. Choose a new V2D_STATE directory.")
 
 
+def saved_timeout(node):
+    cfg = node / "linux-runtime.json"
+    if not cfg.exists():
+        return 600
+    try:
+        raw = json.loads(cfg.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
+            raise ValueError("expected version 1")
+        value = raw.get("timeout_seconds", 600)
+        if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) <= 0:
+            raise ValueError("timeout must be positive and finite")
+        return float(value)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f"Invalid existing configuration/timeout: {cfg}: {exc}") from exc
+
+
 def run(command, env, timeout=180):
     with subprocess.Popen(command, env=env, start_new_session=True) as process:
         try:
@@ -84,8 +101,33 @@ def run(command, env, timeout=180):
         raise RuntimeError(f"Setup command failed with exit {code}: {command[0]}")
 
 
+def extract_driver(archive, target):
+    """Extract to a fresh directory; retain an incomplete previous extraction.
+
+    The NVIDIA archive is only ever invoked with --extract-only. Interrupted
+    runs cannot leave the final directory looking ready on the next attempt.
+    """
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        raise RuntimeError("Refusing a symlink NVIDIA extraction directory")
+    with tempfile.TemporaryDirectory(prefix="nvidia-extract-", dir=target.parent) as temp:
+        staged = Path(temp) / "driver"
+        run(["sh", str(Path(archive).resolve()), "--extract-only", "--target", str(staged)],
+            os.environ.copy(), timeout=600)
+        if not any(pe64(path) for path in staged.rglob("_nvngx.dll")):
+            raise RuntimeError("Extracted NVIDIA archive contains no x64 NGX bridge")
+        if target.exists():
+            backup = Path(tempfile.mkdtemp(prefix=target.name + "-incomplete-", dir=target.parent))
+            backup.rmdir()
+            target.rename(backup)
+            print(f"Retained previous incomplete extraction: {backup}", flush=True)
+        staged.rename(target)
+
+
 def configure(args):
     node, state, proton = args.node.resolve(), args.state.resolve(), args.proton.resolve()
+    timeout = saved_timeout(node)  # Validate before copying DLLs or changing the prefix.
     check_node(node)
     sources = {name: proton / rel for name, rel in GRAPHICS.items()}
     sources["d3dcompiler_47.dll"] = args.compiler.resolve()
@@ -141,7 +183,7 @@ def configure(args):
     }
     cfg = node / "linux-runtime.json"
     tmp_cfg = state / "new-linux-runtime.json"
-    tmp_cfg.write_text(json.dumps({"version": 1, "timeout_seconds": 600, "environment": settings}, indent=2))
+    tmp_cfg.write_text(json.dumps({"version": 1, "timeout_seconds": timeout, "environment": settings}, indent=2))
     atomic_copy(tmp_cfg, cfg)
     manifest = {"driver": "610.57.04", "bridge_source": str(bridge),
         "bridge_sha256": hashlib.sha256(bridge.read_bytes()).hexdigest(),
@@ -168,9 +210,17 @@ def main():
     config = sub.add_parser("configure")
     for field in ["node", "state", "proton", "compiler", "driver-dir"]:
         config.add_argument("--" + field, type=Path, required=True)
+    extract = sub.add_parser("extract-driver")
+    extract.add_argument("--archive", type=Path, required=True)
+    extract.add_argument("--target", type=Path, required=True)
     args = parser.parse_args()
     try:
-        check_node(args.node) if args.mode == "check-node" else configure(args)
+        if args.mode == "check-node":
+            check_node(args.node)
+        elif args.mode == "extract-driver":
+            extract_driver(args.archive, args.target)
+        else:
+            configure(args)
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
         parser.exit(1, "FAILED: " + str(exc) + "\n")
 
