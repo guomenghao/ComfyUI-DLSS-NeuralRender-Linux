@@ -24,6 +24,7 @@ ENV_KEYS = frozenset({
     "DXVK_ENABLE_NVAPI", "DXVK_CONFIG", "DXVK_FILTER_DEVICE_NAME",
     "VKD3D_FILTER_DEVICE_NAME", "NVIDIA_WINE_DLL_DIR",
     "VIDEO2DLSSNR_XVFB", "WINE_GRAPHICS_DRIVER",
+    "VIDEO2DLSSNR_VIDEO_TRANSPORT",
 })
 PATH_FLAGS = frozenset({"--in", "--out", "--dll-dir", "--json"})
 
@@ -105,12 +106,14 @@ def windows_path(path: str, prefix: Path) -> str:
     return letter + "\\" + "\\".join(relative.parts)
 
 
-def launch_spec(exe: str, args: list[str]) -> tuple[list[str], dict, float]:
+def launch_spec(exe: str, args: list[str], *, program: str | None = None) -> tuple[list[str], dict, float]:
     binary = Path(exe).expanduser().resolve()
     for leaf in (binary.name, "nvngx_dlss.dll", "nvngx_dlssnr.dll", "nvngx.dll_dlssnr.dll"):
         validate_binary(binary.parent / leaf)
     env, timeout = worker_settings()
     if sys.platform == "win32":
+        if program is not None:
+            raise RuntimeError("The Wine command wrapper is Linux-only.")
         return [str(binary), *args], {
             "cwd": str(binary.parent), "env": env,
             "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -137,7 +140,9 @@ def launch_spec(exe: str, args: list[str]) -> tuple[list[str], dict, float]:
     # Native NVAPI is needed to expose NVIDIA. Existing explicit settings win.
     env.setdefault("WINEDEBUG", "-all")
     env.setdefault("DXVK_ENABLE_NVAPI", "1")
-    command = [wine, windows_path(str(binary), prefix), *converted]
+    if program not in (None, "cmd.exe"):
+        raise RuntimeError("Unsupported Wine command wrapper.")
+    command = [wine, program or windows_path(str(binary), prefix), *converted]
     headless = env.get("VIDEO2DLSSNR_XVFB", "0")
     if headless not in {"0", "1"}:
         raise RuntimeError("VIDEO2DLSSNR_XVFB must be 0 or 1.")
@@ -154,8 +159,8 @@ def launch_spec(exe: str, args: list[str]) -> tuple[list[str], dict, float]:
 class RuntimeProcess(subprocess.Popen):
     """Bound the whole job, including stalled reads, and own only its process group."""
 
-    def __init__(self, exe: str, args: list[str], **kwargs):
-        command, options, self.timeout_seconds = launch_spec(exe, args)
+    def __init__(self, exe: str, args: list[str], *, program: str | None = None, **kwargs):
+        command, options, self.timeout_seconds = launch_spec(exe, args, program=program)
         self._owns_group = bool(options.get("start_new_session"))
         self.timed_out = threading.Event()
         self._timeout_lock = threading.Lock()

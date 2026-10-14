@@ -30,6 +30,15 @@ def unix_path(raw):
     drive = pathlib.Path(os.environ['WINEPREFIX']) / 'dosdevices' / raw[:2].lower()
     return drive.resolve() / raw[3:].replace('\\', '/')
 mode = os.environ.get('TEST_WORKER_MODE', 'normal')
+if sys.argv[1].lower() == 'cmd.exe':
+    import re, subprocess
+    script = unix_path(args[-1].strip('"')).read_text(encoding='utf-8')
+    line = next(line for line in script.splitlines() if line.startswith('"'))
+    tokens = [token.replace('%%', '%') for token in re.findall(r'"([^"\r\n]*)"', line)]
+    with unix_path(tokens[-3]).open('rb') as src, unix_path(tokens[-2]).open('wb') as dst, unix_path(tokens[-1]).open('wb') as err:
+        result = subprocess.run([sys.executable, __file__, *tokens[:-3]], stdin=src, stdout=dst, stderr=err)
+    print('Wine launcher diagnostics on stdout; must never become raw frames')
+    sys.exit(result.returncode)
 if mode == 'hang':
     time.sleep(60)
 if mode == 'descendant':
@@ -88,12 +97,18 @@ class WineTransportTests(unittest.TestCase):
         self.exe = self.bin / "video2dlssnr.exe"
         for name in ["video2dlssnr.exe", "nvngx_dlss.dll", "nvngx_dlssnr.dll", "nvngx.dll_dlssnr.dll"]:
             (self.bin / name).write_bytes(b"MZfake PE header; never executed")
+        self.files_tmp = tempfile.TemporaryDirectory(prefix='v2d_files 空格 50% & literal! ')
+        self.addCleanup(self.files_tmp.cleanup)
+        self.files_exe = Path(self.files_tmp.name) / 'video2dlssnr.exe'
+        for source in self.bin.iterdir():
+            (self.files_exe.parent / source.name).write_bytes(source.read_bytes())
         self.wine = self.root / "fake wine"
         self.wine.write_text("#!" + sys.executable + "\n" + textwrap.dedent(FAKE_WINE))
         self.wine.chmod(0o755)
         self.config = self.root / "missing-config.json"
         self.env = {"VIDEO2DLSSNR_WINE": str(self.wine), "WINEPREFIX": str(self.prefix),
-                    "VIDEO2DLSSNR_TIMEOUT": "15", "TEST_WORKER_MODE": "normal"}
+                    "VIDEO2DLSSNR_TIMEOUT": "15", "TEST_WORKER_MODE": "normal",
+                    "VIDEO2DLSSNR_VIDEO_TRANSPORT": "pipe"}
         for context in [patch.object(runtime.sys, "platform", "linux"),
                         patch.object(runtime.platform, "machine", return_value="x86_64"),
                         patch.object(runtime, "CONFIG_PATH", self.config),
@@ -191,6 +206,41 @@ class WineTransportTests(unittest.TestCase):
         self.assertEqual(result.dtype, np.uint16)
         self.assertEqual(result.shape, (2, 8, 12, 3))
         np.testing.assert_array_equal(result[:, ::2, ::2], src)
+
+    def test_file_transport_isolates_launcher_logs_and_preserves_sdr_hdr(self):
+        with patch.dict(os.environ, {"VIDEO2DLSSNR_VIDEO_TRANSPORT": "files", "TMPDIR": "/tmp"}):
+            for dtype, transfer in [(np.uint8, None), (np.uint16, "pq")]:
+                with self.subTest(dtype=dtype):
+                    logs, progress = [], []
+                    src = self.frames(dtype)
+                    output = nodes.run_video_np(src, 12, 2, [], True, "lk", False,
+                                                str(self.files_exe), transfer=transfer, log=logs,
+                                                progress=progress.append)
+                    np.testing.assert_array_equal(output[:, ::2, ::2], src)
+                    self.assertEqual(progress, [2])
+                    self.assertIn("launcher diagnostics", "\n".join(logs))
+                    self.assertIn("fake Wine diagnostic", "\n".join(logs))
+
+    def test_file_transport_rejects_short_extra_and_failure(self):
+        for mode in ["short", "extra", "fail"]:
+            with self.subTest(mode=mode), patch.dict(os.environ, {
+                    "VIDEO2DLSSNR_VIDEO_TRANSPORT": "files", "TEST_WORKER_MODE": mode}):
+                with self.assertRaisesRegex(RuntimeError, "file transport failed"):
+                    nodes.run_video_np(self.frames(), 0, 1, [], True, "lk", False,
+                                       str(self.files_exe))
+
+    def test_batch_quoting_preserves_percent_and_rejects_quotes(self):
+        self.assertEqual(nodes._batch_quote('Z:\\50% & literal!.exe'), '"Z:\\50%% & literal!.exe"')
+        for value in ['a"b', 'a\nb', 'a\rb']:
+            with self.assertRaises(RuntimeError):
+                nodes._batch_quote(value)
+
+    def test_file_transport_timeout_stops_worker(self):
+        with patch.dict(os.environ, {"VIDEO2DLSSNR_VIDEO_TRANSPORT": "files",
+                                     "TEST_WORKER_MODE": "hang", "VIDEO2DLSSNR_TIMEOUT": "0.4"}):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                nodes.run_video_np(self.frames(), 0, 1, [], True, "lk", False,
+                                   str(self.files_exe))
 
     def test_short_extra_and_nonzero_output_are_rejected(self):
         for mode, message in [("short", "got"), ("extra", "extra stdout"),

@@ -7,7 +7,8 @@ Two nodes, mirroring the two tabs of the Gradio UI:
   * DLSS Neural Rendering (Video)  — the batch is a clip: frames are streamed through
                                      --nr-video with optical-flow motion vectors, so NR stays
                                      temporally stable. Frames go to the exe as raw RGBA over a
-                                     pipe and come back the same way: no ffmpeg, no temp files.
+                                     pipe and come back the same way on Windows. Linux can
+                                     isolate Wine diagnostics using private raw frame files.
                                      HDR clips (PQ / HLG) are recognised from the Load Video
                                      source and take the tool's HDR path: 16-bit frames, an SDR
                                      proxy for the model, the edit back on the HDR frame as a
@@ -28,12 +29,14 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from fractions import Fraction
+from pathlib import Path
 
-from .wine_runtime import RuntimeProcess, launch_spec
+from .wine_runtime import RuntimeProcess, launch_spec, worker_settings, windows_path
 
 import numpy as np
 import torch
@@ -189,6 +192,76 @@ def failed_stdout_preview(data):
     return "Failed worker stdout preview (diagnostic only, not image data):\n" + text
 
 
+def _batch_quote(value):
+    # cmd batch expansion differs from CreateProcess argument quoting. Quotes,
+    # newlines and NUL cannot safely occur in a Windows argument here. Delayed
+    # expansion is disabled, and %% escapes a literal % in a batch file.
+    if any(char in value for char in ('"', '\r', '\n', '\0')):
+        raise RuntimeError("Wine file transport cannot quote a path/argument containing quotes or newlines.")
+    return '"' + value.replace('%', '%%') + '"'
+
+
+def run_video_files(cmd, rgba, out_w, out_h, dtype, progress=None, log=None):
+    """Windows cmd redirects raw frames to private files, isolating Wine logs."""
+    env, _ = worker_settings()
+    prefix = Path(env["WINEPREFIX"]).expanduser()
+    need = len(rgba) * out_w * out_h * (8 if dtype == np.uint16 else 4)
+    with tempfile.TemporaryDirectory(prefix="v2d_video_") as temp:
+        root = Path(temp)
+        input_path, output_path, stderr_path = (root / leaf for leaf in
+                                               ("input.rgba", "output.rgba", "worker.stderr"))
+        if shutil.disk_usage(root).free < rgba.nbytes + need:
+            raise RuntimeError("Wine file transport needs free temporary disk space for input and output frames.")
+        with input_path.open("wb") as stream:
+            for frame in rgba:
+                stream.write(frame.tobytes())
+        win_args = [windows_path(str(cmd[0]), prefix), *cmd[1:]]
+        # nr-video has no host path flags; raw files are redirected by cmd.exe.
+        redirect = (" <" + _batch_quote(windows_path(str(input_path), prefix)) +
+                    " >" + _batch_quote(windows_path(str(output_path), prefix)) +
+                    " 2>" + _batch_quote(windows_path(str(stderr_path), prefix)))
+        batch = root / "run.cmd"
+        batch.write_text("@echo off\r\nchcp 65001 >nul\r\nsetlocal DisableDelayedExpansion\r\n" +
+                         " ".join(_batch_quote(value) for value in win_args) + redirect +
+                         "\r\nexit /b %errorlevel%\r\n", encoding="utf-8")
+        batch_win = windows_path(str(batch), prefix)
+        # The batch pathname is the outer cmd /c command, before batch escaping.
+        if any(char in batch_win for char in ('"', '%', '!', '\r', '\n')):
+            raise RuntimeError("Wine file transport requires a temporary directory without quotes, %, ! or newlines; set TMPDIR=/tmp.")
+        p = RuntimeProcess(cmd[0], ["/d", "/s", "/c", '"' + batch_win + '"'],
+                           program="cmd.exe", stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        diagnostics = ""
+        try:
+            stdout, stderr = p.communicate()
+            # Wine/Unix logs are outside the raw frame file. Preserve bounded
+            # diagnostics even if the launcher merges its own stdout/stderr.
+            diagnostics = ((stdout or b"") + (stderr or b""))[-16384:].decode("utf-8", "replace")
+            if stderr_path.is_file():
+                with stderr_path.open("rb") as stream:
+                    size = stderr_path.stat().st_size
+                    stream.seek(max(0, size - 65536))
+                    diagnostics += stream.read().decode("utf-8", "replace")
+            if log is not None:
+                log.append("Wine video transport: private raw frame files")
+                log.extend(diagnostics.splitlines())
+            p.check_timeout()
+            got = output_path.stat().st_size if output_path.is_file() else 0
+            if p.returncode != 0 or got != need:
+                raise RuntimeError(f"video2dlssnr file transport failed (exit {p.returncode}, "
+                                   f"got {got}/{need} bytes)\n" + diagnostics[-16384:])
+            if progress:
+                try:
+                    progress(len(rgba))
+                except Exception as exc:
+                    if log is not None:
+                        log.append(f"Progress callback failed: {exc}")
+            data = np.fromfile(output_path, dtype=dtype)
+            return data.reshape(len(rgba), out_h, out_w, 4)[..., :3]
+        finally:
+            p.close_worker()
+
+
 def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adapter=0,
                  progress=None, log=None, height=0, transfer=None, sdr_white=203.0):
     """RGB [B,H,W,3] frames streamed through --nr-video; returns RGB [B,H',W',3] of the same dtype.
@@ -218,6 +291,13 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
 
     if b == 0:
         raise ValueError("Video batch must contain at least one frame.")
+    if sys.platform == "linux":
+        env, _ = worker_settings()
+        transport = env.get("VIDEO2DLSSNR_VIDEO_TRANSPORT", "pipe")
+        if transport not in {"pipe", "files"}:
+            raise ValueError("VIDEO2DLSSNR_VIDEO_TRANSPORT must be pipe or files.")
+        if transport == "files":
+            return run_video_files(cmd, rgba, out_w, out_h, frames.dtype, progress, log)
     need = b * out_w * out_h * bpp
     buf = bytearray(need)
     view = memoryview(buf)

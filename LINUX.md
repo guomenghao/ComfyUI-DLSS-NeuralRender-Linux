@@ -1,8 +1,8 @@
 # video2dlssnr v1.4.1 — Linux/Wine 适配试验版
 
-本包新增 Linux x86-64 的 Wine 启动与数据传输适配，Windows 继续直接启动 EXE。原版节点 ID、端口、参数和工作流连接保持兼容。原版 EXE 和 DLL 均未修改。
+本包新增 Linux x86-64 的 Wine 启动与数据传输适配，Windows 继续直接启动 EXE。原版节点 ID、端口、参数和工作流连接保持兼容。原版 EXE 和 DLSS/NR DLL 均未修改。部署与最新实机问题处理以 [README](README.md) 为准。
 
-**验证范围：本地传输、安装文件与运行库获取测试通过，使用模拟 Wine 子进程验证真实文件和管道传输。尚未在 Linux + Wine + NVIDIA GPU 上运行 DLSS。这个包是供目标机器验收的适配版，不能视为 Linux DLSS 已验证版本。**
+**验证范围：本地传输、安装文件与运行库获取测试通过；用户 RTX 5090 / Linux 610.57.04 已通过生产 NR feature 18 探测及原生分辨率单图输出。视频在旧 shader compiler 的光流编译阶段失败，同时确认 stdout 日志混入。新版编译器及文件传输修复仍待实机复测，不能视为完整 Linux 视频 DLSS 已验证版本。**
 
 ## 改了什么
 
@@ -84,11 +84,7 @@ cp --remove-destination "$V2D_PROTON_FILES/lib/wine/nvapi/x86_64-windows/"{nvapi
 
 来源目录如不存在，需确认该 GE-Proton 包的布局，不要从其他版本任意拼装 DLL。任何复制错误都应先解决，再进行下一步。
 
-按发行版安装 Winetricks，在此 prefix 中安装微软原生 shader compiler：
-
-```bash
-WINE="$VIDEO2DLSSNR_WINE" WINEPREFIX="$WINEPREFIX" winetricks -q d3dcompiler_47
-```
+在此 prefix 中安装新版微软原生 x64 shader compiler。当前自动部署固定为 **10.0.28000.2705**，微软官方 CAB 下载、校验和提取步骤见 `setup_ubuntu24.sh`；旧版 Winetricks 的 `d3dcompiler_47` 可能仍下载 2013 年的 6.3.9600 DLL，在光流着色器报 `X3676`，不能仅凭文件名确认兼容。
 
 若提示缺少 MSVCP140/VCRUNTIME140，再在该 prefix 中安装 `vcrun2022`。Winetricks 失败必须检查原因，不能按“已安装”处理。
 

@@ -86,12 +86,13 @@ if [[ ! -f "$state_dir/runtime/.driver-extracted" ]]; then
     sh "$state_dir/downloads/NVIDIA-Linux-x86_64-610.57.04.run" --extract-only --target "$driver_dir"
     touch "$state_dir/runtime/.driver-extracted"
 fi
-printf '%s\n' 'STEP 4/5: Microsoft native x64 shader compiler (Winetricks SDK recipe).'
-fetch 'https://download.microsoft.com/download/B/0/C/B0C80BA3-8AD6-4958-810B-6882485230B5/standalonesdk/Installers/61d57a7a82309cd161a854a6f4619e52.cab' \
-    "$state_dir/downloads/d3dcompiler_x64.cab" 'f736e161547095bb8d98c636b85fdfeb4070fefeee3c3745db3ce88f6eb1d9de'
-mkdir -p "$state_dir/runtime/compiler"
-cabextract -L -F 'fil3585cb2ea5db13cc0838f8d06b5c9679' -d "$state_dir/runtime/compiler" "$state_dir/downloads/d3dcompiler_x64.cab"
-compiler="$state_dir/runtime/compiler/fil3585cb2ea5db13cc0838f8d06b5c9679"
+printf '%s\n' 'STEP 4/5: Microsoft native x64 shader compiler 10.0.28000.2705.'
+fetch 'https://download.microsoft.com/download/38ab8f6d-3676-4860-ae84-3361308b9d7f/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/Installers/61d57a7a82309cd161a854a6f4619e52.cab' \
+    "$state_dir/downloads/d3dcompiler_47_sdk_28000_x64.cab" 'd951f1eefc051643ed28a0ba8bee804097bb9d6e7ee309d5c1be04f8272c0486'
+mkdir -p "$state_dir/runtime/compiler-sdk-28000"
+cabextract -L -F 'fil3585cb2ea5db13cc0838f8d06b5c9679' -d "$state_dir/runtime/compiler-sdk-28000" "$state_dir/downloads/d3dcompiler_47_sdk_28000_x64.cab"
+compiler="$state_dir/runtime/compiler-sdk-28000/fil3585cb2ea5db13cc0838f8d06b5c9679"
+printf '%s  %s\n' '3e56c1a0867aa04cbca948b3664fcac5d51275865cd044a45a3fd6ce636ee914' "$compiler" | sha256sum -c -
 printf '%s\n' 'STEP 5/5: configure repository node and its managed Wine prefix.'
 "$py_exec" -u "$kit_dir/configure_local.py" configure --node "$node_dir" --state "$state_dir" \
     --proton "$proton_files" --compiler "$compiler" --driver-dir "$driver_dir"

@@ -118,10 +118,12 @@ def configure(args):
              str(wine), "wineboot", "-u"], env)
     if not system32.is_dir() or system32.is_symlink():
         raise RuntimeError("Wine did not create a regular system32 directory.")
+    backup = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%d-%H%M%S-"), dir=_backup_root(state)))
+    old_compiler = system32 / "d3dcompiler_47.dll"
+    if old_compiler.is_file():
+        atomic_copy(old_compiler, backup / "prefix-system32/d3dcompiler_47.dll")
     for name, path in sources.items():
         atomic_copy(path, system32 / name)
-
-    backup = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%d-%H%M%S-"), dir=_backup_root(state)))
     # Repository code is already present; back up only machine-local files.
     for rel in [Path("linux-runtime.json"), Path("bin/_nvngx.dll")]:
         if (node / rel).exists():
@@ -135,6 +137,7 @@ def configure(args):
         "WINE_HEAP_DELAY_FREE": "1", "WINE_HEAP_ZERO_MEMORY": "1",
         "DXVK_FILTER_DEVICE_NAME": "NVIDIA GeForce RTX 5090",
         "VKD3D_FILTER_DEVICE_NAME": "NVIDIA GeForce RTX 5090",
+        "VIDEO2DLSSNR_VIDEO_TRANSPORT": "files",
     }
     cfg = node / "linux-runtime.json"
     tmp_cfg = state / "new-linux-runtime.json"
@@ -143,6 +146,8 @@ def configure(args):
     manifest = {"driver": "610.57.04", "bridge_source": str(bridge),
         "bridge_sha256": hashlib.sha256(bridge.read_bytes()).hexdigest(),
         "prefix": str(prefix), "backup": str(backup),
+        "compiler_sha256": hashlib.sha256(args.compiler.read_bytes()).hexdigest(),
+        "video_transport": "files",
         "configuration_files": ["linux-runtime.json", "bin/_nvngx.dll"],
         "configuration_only": "Actual GPU tests not yet run; execute setup_ubuntu24.sh test."}
     (state / "deployment.json").write_text(json.dumps(manifest, indent=2))

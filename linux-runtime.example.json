@@ -6,6 +6,7 @@
     "WINEPREFIX": "/absolute/path/to/dedicated/video2dlssnr-prefix",
     "WINESERVER": "/absolute/path/to/GE-Proton/files/bin/wineserver",
     "WINEDEBUG": "-all",
+    "VIDEO2DLSSNR_VIDEO_TRANSPORT": "files",
     "WINEDLLOVERRIDES": "dxgi,d3d11,d3d12,d3d12core,nvapi64,nvofapi64,d3dcompiler_47=n,b",
     "DXVK_ENABLE_NVAPI": "1",
     "DXVK_CONFIG": "dxgi.hideNvidiaGpu = False",

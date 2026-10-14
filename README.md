@@ -2,7 +2,7 @@
 
 video2dlssnr v1.4.1 的实验性 Linux/Wine 适配节点，支持 DLSS Super Resolution + Neural Rendering 的图像及视频处理。Windows 仍直接调用上游 EXE。
 
-**状态：本地模拟传输与部署检查通过，真实 Linux/Wine/NVIDIA NR 尚待目标机器验收。GitHub CI 只验证 Python、文件和管道逻辑，不验证 GPU。**
+**状态：RTX 5090 / Linux 610.57.04 已通过 NR feature 18 探测及单图输出；视频在旧编译器的光流阶段失败。新版编译器与文件传输修复仍待实机复测。GitHub CI 验证传输和部署逻辑，不验证 GPU。**
 
 上游：[DaniilSokolyuk/video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr)。这是独立的社区适配项目，不属于 NVIDIA 官方项目。
 
@@ -10,7 +10,7 @@ video2dlssnr v1.4.1 的实验性 Linux/Wine 适配节点，支持 DLSS Super Res
 
 - 保留上游三个节点及原有 ID：`DLSSNR_Image`、`DLSSNR_Video`、`DLSSNR_RuntimeInfo`。
 - Linux 的工作程序通过 Wine 启动；ComfyUI、PyTorch 和视频编码仍原生运行。
-- 按实际 Wine 盘符转换图像路径；SDR 8-bit 和 HDR 16-bit 帧通过独立二进制管道传输，诊断日志走 stderr。
+- 按实际 Wine 盘符转换图像路径；SDR 8-bit 和 HDR 16-bit 支持二进制管道及 Linux 专用原始帧文件传输。当前自动部署使用文件方式隔离 Wine 日志与帧数据，Windows 继续使用管道。
 - 无桌面环境可用 Xvfb 包装每次调用，明确筛选 NVIDIA GPU；只有工作子进程使用专用配置。
 - 提供进程超时和独立进程组清理，修复上游 Runtime Check 的参数数量错误。
 - 不增加视频帧数，不修改或伪造 NVIDIA 驱动版本，不修改上游 EXE/DLL。
@@ -56,7 +56,7 @@ bash setup_ubuntu24.sh install
 2. 优先校验当前节点和 `~/ComfyUI/node_backups/video2dlssnr-*/bin/` 中的原版运行库。能凑齐六个匹配的二进制时直接复用，无需下载 ZIP；否则下载固定的 v1.4.1 ComfyUI 发布包，验证整个 ZIP 和六个二进制哈希，仅提取 `bin/`，不覆盖本项目 Python。
 3. 下载并校验 GE-Proton11-6 x86_64，使用其配套 Wine、DXVK、VKD3D-Proton、DXVK-NVAPI。
 4. 校验 NVIDIA 610.57.04 `.run` 包，仅 `--extract-only` 解压匹配的 `_nvngx.dll`，不运行 `nvidia-installer`，不安装 NVIDIA apt 包或替换宿主机驱动。
-5. 从微软 SDK CAB 获取并校验原生 x64 shader compiler，建立受本项目标记的专用 prefix。
+5. 从微软 SDK CAB 获取并校验原生 x64 shader compiler **10.0.28000.2705**，建立受本项目标记的专用 prefix。旧版 6.3.9600 编译器不适用于本节点的多分量 UAV 光流着色器。
 6. 备份已有本机配置及驱动桥，写入 `linux-runtime.json`，每次 Wine 调用使用 Xvfb，GPU 选择 RTX 5090。
 
 需要下载超过 1 GB 的运行文件及依赖，安装前预留至少 8 GiB 空间。所有配置与下载状态默认保存在：
@@ -135,6 +135,18 @@ cat "$V2D_VIDEO_TEST_DIR/video-worker.log"
 ```
 
 这是获取失败证据的诊断增强，不代表视频故障已修复。`--video-only` 的报告标记测试范围，不重复单图和 NR 探测。
+
+### 光流编译 `X3676` 与 stdout 日志混入
+
+RTX 5090 / 610.57.04 的实机日志已证明 feature 18 的创建、求值及单图输出成功；短视频随后在 `optflow up` 着色器报 `typed UAV loads are only allowed for single-component 32-bit element types`。安装器原先采用的 Windows 8.1 SDK 编译器为 6.3.9600.16384，现改为固定的微软 SDK **10.0.28000.2705**：CAB 9495635 字节，SHA-256 `d951f1eefc051643ed28a0ba8bee804097bb9d6e7ee309d5c1be04f8272c0486`；x64 DLL SHA-256 `3e56c1a0867aa04cbca948b3664fcac5d51275865cd044a45a3fd6ce636ee914`。旧下载保留在原路径，替换前备份 prefix 中的编译器。
+
+同一日志还证明 Wine/程序诊断进入了 stdout 原始帧通道。新版自动部署在 `linux-runtime.json` 设置 `VIDEO2DLSSNR_VIDEO_TRANSPORT=files`，使用 Wine 内的 cmd 批处理将 stdin、stdout 和 stderr 分别绑定到本次任务的独立文件。整个视频仍由上游 `--nr-video` 一次处理，保留时序处理；不逐帧改用单图，不过滤混合流中的“疑似日志”。完成后检查退出状态与输出字节数，再读取原始帧。Wine 启动器日志单独捕获。
+
+文件方式需要临时磁盘容纳输入和输出 RGBA 帧，结束后自动清理本次临时目录；进度目前在完成时更新。支持普通空格、UTF-8 路径以及参数内的百分号、`&` 和 `!`；Windows 参数不能含双引号或换行，批处理自身所在临时目录还不能含 `%` 或 `!`，必要时设置 `TMPDIR=/tmp`。未配置该选项的 Linux 环境仍默认 `pipe`。新版文件方式及编译器更新通过本地模拟传输验证，**修复后的真实 GPU 视频仍待实机复测**。
+
+更新后运行 `bash setup_ubuntu24.sh install` 获取约 9.1 MiB 的新 CAB、更新专用配置，再按上一节 `--video-only` 重跑。既有 GE-Proton 和 NVIDIA 大文件校验通过后复用。
+
+依据：[Winetricks 编译器更新记录](https://github.com/Winetricks/winetricks/issues/2522)、[微软 typed UAV loads 文档](https://learn.microsoft.com/en-us/windows/win32/direct3d12/typed-unordered-access-view-loads)。本仓库采用官方微软下载地址，并独立核验了 CAB、DLL 哈希与 x64 文件版本。
 
 ### 初始化报 `/lib/ld-linux.so.2: could not open`
 
