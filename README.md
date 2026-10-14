@@ -69,6 +69,23 @@ bash setup_ubuntu24.sh install
 
 安装显示 `INSTALL COMPLETE` 才进入测试；出现 `FAILED` 则先处理对应日志。重跑会复用校验通过的下载及本项目管理的 prefix，不重新初始化已有图形 DLL。
 
+### GE-Proton 下载慢或中断
+
+GE-Proton11-6 压缩包约 509 MiB。安装脚本支持 `.part` 断点续传，连接失败会从最新下载位置重试；不再因一小时总超时丢失进度。GE-Proton、NVIDIA 驱动归档和微软 CAB 均使用此机制，完成后仍验证固定 SHA-256。
+
+正在运行旧脚本时，先按 **Ctrl+C**，保留状态目录中的 `.part` 文件，然后更新源码、改用 SourceForge 镜像续传：
+
+```bash
+cd "$HOME/ComfyUI/custom_nodes/ComfyUI-DLSS-NeuralRender-Linux"
+git pull --ff-only && \
+V2D_PROTON_URL='https://downloads.sourceforge.net/project/proton-ge-custom.mirror/GE-Proton11-6/GE-Proton11-6-x86_64.tar.gz' \
+bash setup_ubuntu24.sh install
+```
+
+[SourceForge 镜像页面](https://sourceforge.net/projects/proton-ge-custom.mirror/files/GE-Proton11-6/GE-Proton11-6-x86_64.tar.gz/)列出的 SHA-256 与固定上游文件一致；镜像速度取决于服务器网络。不设置 `V2D_PROTON_URL` 时仍从官方 GitHub Release 获取。切换来源不会改变运行库版本或校验值。若来源不支持续传，脚本停止并保留部分文件，不自动从头覆盖。
+
+若在其他机器下载后上传，将完整文件放到 `$V2D_STATE/downloads/GE-Proton11-6-x86_64.tar.gz`（未设置 `V2D_STATE` 时为 `~/.local/share/video2dlssnr-linux-610.57.04/downloads/`）；安装时哈希校验通过会直接复用。
+
 ### 3. 分层测试实际 NR
 
 ```bash

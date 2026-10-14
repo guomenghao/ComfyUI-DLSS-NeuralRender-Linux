@@ -9,7 +9,7 @@ py_exec="${V2D_PYTHON:-$(command -v python)}"
 mode="${1:-help}"
 if [[ "$mode" == help ]]; then
     printf '%s\n' 'Usage: bash setup_ubuntu24.sh install|test' \
-      'Optional: V2D_NODE_DIR, V2D_STATE, V2D_PYTHON.' \
+      'Optional: V2D_NODE_DIR, V2D_STATE, V2D_PYTHON, V2D_PROTON_URL.' \
       'install: dependencies, pinned downloads, code backup/deploy, dedicated prefix.' \
       'test: help -> production NR probe -> real image/video smoke test, stop on failure.'
     exit 0
@@ -45,16 +45,11 @@ mkdir -p "$state_dir/downloads" "$state_dir/runtime"
 "$py_exec" -u "$kit_dir/fetch_runtime.py" --node "$node_dir" --cache "$state_dir/downloads"
 "$py_exec" -u "$kit_dir/configure_local.py" check-node --node "$node_dir"
 fetch() {
-    local url="$1" target="$2" digest="$3"
-    if [[ -f "$target" ]] && printf '%s  %s\n' "$digest" "$target" | sha256sum -c -; then
-        return
-    fi
-    curl -fL --retry 3 --connect-timeout 30 --max-time 3600 -o "$target.part" "$url"
-    printf '%s  %s\n' "$digest" "$target.part" | sha256sum -c -
-    mv -- "$target.part" "$target"
+    "$py_exec" -u "$kit_dir/fetch_asset.py" "$1" "$2" "$3"
 }
 printf '%s\n' 'STEP 2/5: pinned GE-Proton11-6 Wine and graphics libraries.'
-fetch 'https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-6/GE-Proton11-6-x86_64.tar.gz' \
+proton_url="${V2D_PROTON_URL:-https://github.com/GloriousEggroll/proton-ge-custom/releases/download/GE-Proton11-6/GE-Proton11-6-x86_64.tar.gz}"
+fetch "$proton_url" \
     "$state_dir/downloads/GE-Proton11-6-x86_64.tar.gz" \
     '659f8d71f2f78659340120b20c1c5a1464aa138939332a1376dea22f6d2dc2e4'
 if [[ ! -f "$state_dir/runtime/.proton-extracted" ]]; then
