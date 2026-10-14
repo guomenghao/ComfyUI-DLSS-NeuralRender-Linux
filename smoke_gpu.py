@@ -11,6 +11,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--node", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--video-only", action="store_true",
+                        help="Retest video without repeating the successful image/probe stages")
     args = parser.parse_args()
     import numpy as np
     from PIL import Image
@@ -23,7 +25,9 @@ def main():
     out_dir = args.output.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     report = {"status": "RUNNING", "kind": "real target Wine/NVIDIA NR test", "scale": 1,
-              "motion_engine": "lk", "audio": "synthetic input has no audio; not an audio preservation test"}
+              "motion_engine": "lk", "scope": "video-only" if args.video_only else "image-and-video",
+              "audio": "synthetic input has no audio; not an audio preservation test"}
+    print(f"Test artifacts and diagnostics: {out_dir}", flush=True)
     try:
         h, w = 720, 1280
         yy, xx = np.mgrid[0:h, 0:w]
@@ -33,11 +37,12 @@ def main():
         exe = nodes.find_exe()
         nr = nodes.nr_args("Default", "Default", 1, 1, 1, -1,
                           detail=1, color=1, ui_correction=False, auto_mask=False)
-        image = nodes.run_image_np(frame, 0, 1, nr, exe, adapter=0)
-        if image.shape != frame.shape or image.dtype != np.uint8:
-            raise RuntimeError(f"Unexpected image output {image.shape}/{image.dtype}")
-        Image.fromarray(image).save(out_dir / "image_nr.png")
-        report["image"] = "actual NR CLI returned a decodable 1280x720 RGB image"
+        if not args.video_only:
+            image = nodes.run_image_np(frame, 0, 1, nr, exe, adapter=0)
+            if image.shape != frame.shape or image.dtype != np.uint8:
+                raise RuntimeError(f"Unexpected image output {image.shape}/{image.dtype}")
+            Image.fromarray(image).save(out_dir / "image_nr.png")
+            report["image"] = "actual NR CLI returned a decodable 1280x720 RGB image"
         logs = []
         try:
             video = nodes.run_video_np(frames, 0, 1, nr, True, "lk", False, exe, adapter=0, log=logs)

@@ -168,6 +168,27 @@ def run_image_np(img_u8, width, scale, nr, exe, adapter=0, height=0):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def failed_stdout_preview(data):
+    """Bound failed-worker output; Wine may put a crash report on the frame pipe."""
+    if not data:
+        return ""
+    limit = 16384
+    sample = bytes(data[:12288])
+    if len(data) > limit:
+        sample += b"\n[... stdout preview truncated ...]\n" + bytes(data[-4096:])
+    else:
+        sample = bytes(data)
+    printable = sum(byte in (9, 10, 13) or 32 <= byte < 127 for byte in sample)
+    if printable / len(sample) >= 0.85:
+        text = sample.decode("utf-8", "replace")
+        # Keep terminal control bytes inert while retaining readable crash text.
+        text = "".join(char if char in "\n\t" or char.isprintable()
+                       else f"\\x{ord(char):02x}" for char in text)
+    else:
+        text = "Non-text output; first 64 bytes (hex): " + bytes(data[:64]).hex(" ")
+    return "Failed worker stdout preview (diagnostic only, not image data):\n" + text
+
+
 def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adapter=0,
                  progress=None, log=None, height=0, transfer=None, sdr_white=203.0):
     """RGB [B,H,W,3] frames streamed through --nr-video; returns RGB [B,H',W',3] of the same dtype.
@@ -245,17 +266,24 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
         rc = p.wait()
         tf.join(timeout=5)
         td.join(timeout=5)
+        failed = p.timed_out.is_set() or bool(extra) or rc != 0 or got != need
+        preview = failed_stdout_preview(view[:got]) if failed else ""
         if log is not None:
             log.extend(err)
+            if preview:
+                log.append(preview)
+        diagnostics = "\n".join(err)[-3000:]
+        if preview:
+            diagnostics += "\n" + preview
         if p.timed_out.is_set():
             raise RuntimeError(f"video2dlssnr timed out after {p.timeout_seconds:g}s "
-                               f"(got {got}/{need} bytes)\n" + "\n".join(err)[-3000:])
+                               f"(got {got}/{need} bytes)\n" + diagnostics)
         if extra:
             raise RuntimeError("Unexpected extra stdout bytes: binary frame stream was "
-                               "polluted or the worker returned extra frames.\n" + "\n".join(err)[-3000:])
+                               "polluted or the worker returned extra frames.\n" + diagnostics)
         if rc != 0 or got != need:
             raise RuntimeError(f"video2dlssnr failed (exit {rc}, got {got}/{need} bytes)\n"
-                               + "\n".join(err)[-3000:])
+                               + diagnostics)
         return np.frombuffer(buf, frames.dtype).reshape(b, out_h, out_w, 4)[..., :3]
     finally:
         if p.poll() is None:

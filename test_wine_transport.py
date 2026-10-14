@@ -39,6 +39,10 @@ if mode == 'descendant':
 if mode == 'fail':
     sys.stderr.write('NGX initialization failed in fake worker\n')
     sys.exit(73)
+if mode == 'stdout-crash':
+    sys.stdout.buffer.write(b'wine: Unhandled exception c0000005\n' + b'A' * 10200 + b'\ncrash report end\n')
+    sys.stdout.buffer.flush()
+    sys.exit(1)
 if '--help' in args:
     print('video2dlssnr fake help: transport only')
     sys.exit(0)
@@ -194,6 +198,26 @@ class WineTransportTests(unittest.TestCase):
             with self.subTest(mode=mode), patch.dict(os.environ, {"TEST_WORKER_MODE": mode}):
                 with self.assertRaisesRegex(RuntimeError, message):
                     self.run_video()
+
+    def test_stdout_crash_report_survives_empty_stderr(self):
+        logs = []
+        with patch.dict(os.environ, {"TEST_WORKER_MODE": "stdout-crash"}):
+            with self.assertRaisesRegex(RuntimeError, "Unhandled exception c0000005") as failure:
+                nodes.run_video_np(np.zeros((2, 64, 64, 3), np.uint8), 0, 1, [],
+                                   True, "lk", False, str(self.exe), log=logs)
+        self.assertIn("crash report end", str(failure.exception))
+        self.assertIn("Unhandled exception c0000005", "\n".join(logs))
+
+    def test_failed_stdout_preview_bounds_binary_and_terminal_controls(self):
+        binary = nodes.failed_stdout_preview(b"\x00\xff\x01" * 20000)
+        self.assertIn("first 64 bytes (hex)", binary)
+        self.assertLess(len(binary), 400)
+        text = nodes.failed_stdout_preview(b"HEADER\n\x1b[31m" + b"A" * 20000 + b"\nTAIL")
+        self.assertIn("HEADER", text)
+        self.assertIn("TAIL", text)
+        self.assertIn("truncated", text)
+        self.assertNotIn("\x1b", text)
+        self.assertLess(len(text), 17000)
 
     def test_timeout_stops_hang_and_descendant_holding_pipe(self):
         for mode in ["hang", "descendant"]:

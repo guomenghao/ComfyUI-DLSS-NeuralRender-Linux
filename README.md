@@ -122,6 +122,20 @@ cat "$HOME/.local/share/video2dlssnr-linux-610.57.04/gpu-test/results.json"
 
 使用自定义 `V2D_STATE` 时，相应替换日志目录。
 
+### 视频退出失败但 stderr 日志为空
+
+Wine 崩溃报告可能写入本应传输原始帧的 stdout。新版节点在任务失败时将有限的 stdout 预览附入异常和 `video-worker.log`，文本保留开头/结尾，二进制只显示前 64 字节的十六进制；不会把错误文本当作图片，也不会在成功时记录帧数据。
+
+如果 NR 探测和单图已通过，只重跑短视频即可。新目录保留此前结果：
+
+```bash
+V2D_VIDEO_TEST_DIR="${V2D_STATE:-$HOME/.local/share/video2dlssnr-linux-610.57.04}/gpu-test-video-$(date +%Y%m%d-%H%M%S)"
+python -u smoke_gpu.py --node "$PWD" --output "$V2D_VIDEO_TEST_DIR" --video-only
+cat "$V2D_VIDEO_TEST_DIR/video-worker.log"
+```
+
+这是获取失败证据的诊断增强，不代表视频故障已修复。`--video-only` 的报告标记测试范围，不重复单图和 NR 探测。
+
 ### 初始化报 `/lib/ld-linux.so.2: could not open`
 
 这是当前直接调用 GE-Proton Wine 的环境缺少 32 位 glibc 加载器，发生在 prefix 初始化，尚未运行 DLSS。Ubuntu 24.04 amd64 可用 `apt-get install -y --no-install-recommends libc6-i386` 补齐；无需为这个加载器开启整个 i386 软件源。新版安装器已包含该依赖并在初始化前检查 `/lib/ld-linux.so.2`。
