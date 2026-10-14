@@ -52,7 +52,7 @@ bash setup_ubuntu24.sh install
 
 脚本会：
 
-1. 安装 Ubuntu 用户态依赖、Wine、Xvfb/Xauth、Vulkan/CAB 工具和 FFmpeg。
+1. 安装 Ubuntu 用户态依赖、Wine、32 位 glibc 加载器（`libc6-i386`）、Xvfb/Xauth、Vulkan/CAB 工具和 FFmpeg。
 2. 优先校验当前节点和 `~/ComfyUI/node_backups/video2dlssnr-*/bin/` 中的原版运行库。能凑齐六个匹配的二进制时直接复用，无需下载 ZIP；否则下载固定的 v1.4.1 ComfyUI 发布包，验证整个 ZIP 和六个二进制哈希，仅提取 `bin/`，不覆盖本项目 Python。
 3. 下载并校验 GE-Proton11-6 x86_64，使用其配套 Wine、DXVK、VKD3D-Proton、DXVK-NVAPI。
 4. 校验 NVIDIA 610.57.04 `.run` 包，仅 `--extract-only` 解压匹配的 `_nvngx.dll`，不运行 `nvidia-installer`，不安装 NVIDIA apt 包或替换宿主机驱动。
@@ -121,6 +121,16 @@ cat "$HOME/.local/share/video2dlssnr-linux-610.57.04/gpu-test/results.json"
 ```
 
 使用自定义 `V2D_STATE` 时，相应替换日志目录。
+
+### 初始化报 `/lib/ld-linux.so.2: could not open`
+
+这是当前直接调用 GE-Proton Wine 的环境缺少 32 位 glibc 加载器，发生在 prefix 初始化，尚未运行 DLSS。Ubuntu 24.04 amd64 可用 `apt-get install -y --no-install-recommends libc6-i386` 补齐；无需为这个加载器开启整个 i386 软件源。新版安装器已包含该依赖并在初始化前检查 `/lib/ld-linux.so.2`。
+
+更新源码后重跑 `bash setup_ubuntu24.sh install`，复用已校验的下载与本项目标记的 prefix，不删除运行库或 prefix。若仍失败，保留新日志；补齐加载器只解决此处缺失，其他 Wine 共享库和 GPU 功能仍需验收。
+
+微软 CAB 若提示 `possible ... extra bytes at end of file`，同时显示完整包 SHA-256 校验通过及 `All done, no errors`，该提示不是此处 Wine 初始化失败的原因。
+
+参考：[Ubuntu libc6-i386](https://packages.ubuntu.com/noble/libc6-i386)、[包内加载器文件](https://packages.ubuntu.com/noble/amd64/libc6-i386/filelist)。当前方案直接调用 GE-Proton 的 Wine；[上游推荐通过 Steam/umu 的配套运行时启动](https://github.com/GloriousEggroll/proton-ge-custom/blob/GE-Proton11-6/README.md)，因此直接调用时需在宿主容器补齐系统共享库，仍属于实验性适配。
 
 ### 4. 重启 ComfyUI 并验证工作流
 

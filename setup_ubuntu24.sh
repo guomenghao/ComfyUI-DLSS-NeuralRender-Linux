@@ -40,7 +40,11 @@ printf '%s\n' 'STEP 1/5: Ubuntu user-space prerequisites (no NVIDIA packages).'
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     curl ca-certificates unzip tar xz-utils zstd cabextract xvfb xauth \
-    wine64 wine winetricks libvulkan1 vulkan-tools ffmpeg
+    wine64 wine winetricks libc6-i386 libvulkan1 vulkan-tools ffmpeg
+[[ -x /lib/ld-linux.so.2 ]] || {
+    printf 'Missing GE-Proton 32-bit loader /lib/ld-linux.so.2 after libc6-i386 installation; inspect apt/dpkg output.\n'
+    exit 1
+}
 mkdir -p "$state_dir/downloads" "$state_dir/runtime"
 runtime_args=(--node "$node_dir" --cache "$state_dir/downloads")
 if [[ -n "${V2D_RUNTIME_ARCHIVE:-}" ]]; then
