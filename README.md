@@ -217,6 +217,8 @@ cd "$HOME/ComfyUI"
 
 当原生 FFmpeg 返回 `OpenEncodeSessionEx: unsupported device (2)` 时，可按 [NVENC_CONTAINER.md](NVENC_CONTAINER.md) 尝试仅对 FFmpeg 启用 GPU 枚举修复。保留当前驱动，先实际编码和解码测试，通过后再接入插帧节点。2026-10-14，目标 Ubuntu 24.04 Docker / RTX 5090 / 610.57.04 已通过修正版的 256×256、1296×720 两个短 H.264 NVENC 编码及完整解码测试。ComfyUI 内联合 DLSSG + NVENC、音轨、HDR、其他编码器及长视频仍待验证；实机结果与 CI 分开记录。
 
+已通过 NVENC GPU 测试后，可执行 `python install_nvenc_startup.py`，将根目录 `start.sh`、`stop.sh`、持久化 FFmpeg 配置以及 `/start.d/comfyui.sh` 一起部署。开机脚本调用同一份 `start.sh`，自动加载已验证的包装器；原文件会备份。见 [持久化部署说明](NVENC_CONTAINER.md#persist-manual-and-container-startup-after-pass)。该安装器保留当前 NVIDIA 驱动，不全局设置 `LD_PRELOAD`。
+
 ## Windows
 
 使用现有 ComfyUI Python 执行 `python fetch_runtime.py` 下载校验后的上游运行库（需要 PATH 中的 curl），或用 `python fetch_runtime.py --archive C:/downloads/video2dlssnr-comfyui.zip` 安装已经下载的完整包，然后重启 ComfyUI。此时直接执行 EXE；不读取 Linux 配置，不启动 Wine。上游要求 NVIDIA RTX 与 Windows 驱动 616.56+；本项目未进行 Windows GPU 回归测试。

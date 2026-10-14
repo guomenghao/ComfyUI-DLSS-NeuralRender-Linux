@@ -29,7 +29,7 @@ p.add_argument('--port',type=int)
 args,_ = p.parse_known_args()
 if os.environ.get('CONTROL_TEST_IGNORE_TERM') == '1':
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-Path('ready.json').write_text(json.dumps({'pid':os.getpid(), 'display':os.environ.get('DISPLAY'), 'args':__import__('sys').argv}))
+Path('ready.json').write_text(json.dumps({'pid':os.getpid(), 'display':os.environ.get('DISPLAY'), 'args':__import__('sys').argv, 'ffmpeg':os.environ.get('DLSS_FFMPEG_PATH'), 'ffprobe':os.environ.get('DLSS_FFPROBE_PATH'), 'preload':os.environ.get('LD_PRELOAD')}))
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/interrupt': Path('interrupt.received').touch()
@@ -211,6 +211,37 @@ class ControlScriptIntegrationTests(unittest.TestCase):
         self.wait_ready()
         result = self.control("stop.sh")
         self.assertIn("正常退出超时", result.stdout)
+        self.assertEqual(controller.workers(self.app.resolve(), self.port), [])
+
+    def test_boot_and_manual_start_share_persistent_nvenc_configuration(self):
+        import json
+        import install_nvenc_startup as installer
+        from test_nvenc_startup import runtime_fixture
+        runtime, ffmpeg, ffprobe, _ = runtime_fixture(self.root)
+        boot_dir = self.root / "start.d"
+        boot_dir.mkdir()
+        boot = boot_dir / "comfyui.sh"
+        with patch.object(installer, "FFMPEG", ffmpeg), patch.object(installer, "FFPROBE", ffprobe):
+            installer.install(self.app, boot, runtime)
+        fresh_env = {k:v for k,v in self.env.items() if k not in (
+            "DLSS_FFMPEG_PATH", "DLSS_FFPROBE_PATH", "LD_PRELOAD")}
+        launch = subprocess.run(["bash", str(boot)], env=fresh_env,
+                                capture_output=True, text=True, timeout=12)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        self.wait_ready()
+        ready = json.loads((self.app / "ready.json").read_text())
+        self.assertEqual(ready["ffmpeg"], str(runtime / "ffmpeg"))
+        self.assertEqual(ready["ffprobe"], str(ffprobe))
+        self.assertIsNone(ready["preload"])
+        self.control("stop.sh")
+        (self.app / "ready.json").unlink()
+        self.control("start.sh")
+        self.wait_ready()
+        ready = json.loads((self.app / "ready.json").read_text())
+        self.assertEqual(ready["ffmpeg"], str(runtime / "ffmpeg"))
+        # Stop must work even when a persisted library is lost after launch.
+        (runtime / "libnvenc_fix.so").unlink()
+        self.control("stop.sh")
         self.assertEqual(controller.workers(self.app.resolve(), self.port), [])
 
 

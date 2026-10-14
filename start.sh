@@ -19,6 +19,7 @@ exec "$comfy_python" - "$comfy_mode" "$comfy_dir" "$comfy_python" <<'PY'
 # PYTHON CONTROL BEGIN
 import fcntl
 import errno
+import hashlib
 import json
 import math
 import os
@@ -33,6 +34,41 @@ import time
 import urllib.request
 
 PROC = Path("/proc")
+
+
+def start_environment(directory):
+    """Load persistent FFmpeg selection; LD_PRELOAD remains inside its wrapper."""
+    env = os.environ.copy()
+    config = directory / "comfyui-runtime.json"
+    if not config.exists() and not config.is_symlink():
+        return env
+    if config.is_symlink() or not config.is_file():
+        raise RuntimeError("comfyui-runtime.json 必须是普通文件")
+    saved = json.loads(config.read_text())
+    allowed = {"DLSS_FFMPEG_PATH", "DLSS_FFPROBE_PATH"}
+    if (not isinstance(saved, dict) or set(saved) != {"version", "environment", "nvenc"}
+            or saved["version"] != 1 or not isinstance(saved["environment"], dict)
+            or set(saved["environment"]) != allowed):
+        raise RuntimeError("comfyui-runtime.json 配置格式无效")
+    for key, value in saved["environment"].items():
+        if not isinstance(value, str):
+            raise RuntimeError("FFmpeg 配置路径必须是字符串")
+        env.setdefault(key, value)  # explicit per-launch overrides support rollback
+        path = Path(env[key])
+        if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+            raise RuntimeError(f"{key} 不可执行或缺失：{path}")
+    if env["DLSS_FFMPEG_PATH"] == saved["environment"]["DLSS_FFMPEG_PATH"]:
+        record = saved["nvenc"]
+        if (not isinstance(record, dict) or set(record) != {
+                "source_sha256", "library", "library_sha256", "wrapper_sha256"}):
+            raise RuntimeError("NVENC 运行库记录无效")
+        for path, expected in ((Path(record["library"]), record["library_sha256"]),
+                               (Path(env["DLSS_FFMPEG_PATH"]), record["wrapper_sha256"])):
+            if (not path.is_absolute() or path.is_symlink() or not path.is_file()
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != expected):
+                raise RuntimeError(f"NVENC 运行库缺失或已改变：{path}；请检查持久化磁盘")
+    print("FFmpeg：" + env["DLSS_FFMPEG_PATH"], flush=True)
+    return env
 
 
 def process_info(pid):
@@ -225,6 +261,7 @@ def start(directory, python, port, state):
         raise RuntimeError("上次启动程序仍存活；先运行 ./stop.sh，再检查 comfy.log")
     if not (directory / "main.py").is_file():
         raise RuntimeError("请将 start.sh 和 stop.sh 放在包含 main.py 的 ComfyUI 根目录")
+    env = start_environment(directory)
     xvfb = shutil.which("xvfb-run")
     if not xvfb or not shutil.which("xauth"):
         raise RuntimeError("缺少 xvfb-run 或 xauth；安装 xvfb 和 xauth 后重试")
@@ -245,7 +282,7 @@ def start(directory, python, port, state):
                "--port", str(port), "--enable-manager"]
     with (directory / "comfy.log").open("ab") as log:
         process = subprocess.Popen(command, cwd=directory, stdin=subprocess.DEVNULL,
-            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=env)
     launcher = process_info(process.pid)
     if launcher is not None:
         write_state(state, launcher)
@@ -295,7 +332,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
         print("失败：" + str(exc), file=sys.stderr)
         raise SystemExit(1)
 # PYTHON CONTROL END

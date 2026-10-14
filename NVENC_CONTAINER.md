@@ -83,7 +83,57 @@ FFmpeg selection rules.
 
 To roll back, restart ComfyUI with `DLSS_FFMPEG_PATH=/usr/bin/ffmpeg` and
 `DLSS_FFPROBE_PATH=/usr/bin/ffprobe`, and return to plain `H.264` if NVENC still
-fails. This optional helper does not change automatic startup configuration.
+fails. The build/test helper does not change automatic startup configuration.
+Use the explicit deployment step below to persist it.
+
+## Persist manual and container startup after PASS
+
+This deployment persists the current CompShare startup configuration.
+`install_nvenc_startup.py` reuses the runtime and matching two-size PASS report;
+it does not rebuild the library, rerun GPU tests, install packages, or change
+NVIDIA driver files. From this repository on the server:
+
+```bash
+/root/miniconda3/bin/python install_nvenc_startup.py \
+  --comfyui "$HOME/ComfyUI" --boot-script /start.d/comfyui.sh
+cd "$HOME/ComfyUI"
+./stop.sh && ./start.sh
+```
+
+Installation writes four files, after syntax checks and runtime validation:
+
+- `~/ComfyUI/start.sh`: loads `comfyui-runtime.json` for every fresh start.
+- `~/ComfyUI/stop.sh`: retains scoped shutdown and works even if the runtime is missing.
+- `~/ComfyUI/comfyui-runtime.json`: persists the two FFmpeg selection variables
+  and runtime fingerprints; no global `LD_PRELOAD`.
+- `/start.d/comfyui.sh`: delegates to `~/ComfyUI/start.sh`, so automatic and
+  manual startup share the same Xvfb, Conda, port and Manager parameters.
+
+The CompShare `/entrypoint.sh` in the user's logs runs `/start.d/*.sh` at container
+startup. The delegate exits after the control script creates the detached
+ComfyUI/Xvfb process. Encoding is available after container restart without
+manually exporting FFmpeg variables. Keep the workflow codec set to
+`H.264 (NVIDIA NVENC)`; persistence does not rewrite saved workflows.
+
+Existing files are backed up under `~/ComfyUI/node_backups/nvenc-startup-*`,
+with a manifest identifying each original. Backups remain outside `/start.d`
+so the platform will not execute an old second launch script. Ordinary file
+write failures restore files already changed. Rerunning with identical files
+makes no changes. `--check` validates and prints the plan without writing.
+The installer does not restart ComfyUI itself; the explicit stop/start command
+above does that. The server's real container restart and joint ComfyUI
+DLSSG/NVENC workflow remain target acceptance steps.
+
+At each fresh start, configured paths must exist and be executable; the saved
+wrapper/library fingerprints must match. Missing or changed libraries stop
+startup with a clear message in the boot log rather than selecting an unusable
+encoder. Shutdown is independent of these checks. An explicit per-launch
+`DLSS_FFMPEG_PATH=/usr/bin/ffmpeg` supports temporary CPU rollback, with the
+workflow codec returned to plain `H.264`.
+
+Logs: `~/ComfyUI/comfy.log` for ComfyUI and `/start.d/log/comfyui.log` for the
+platform's boot entry. Config/runtime files must remain on the retained system
+disk; reinstalling the image or replacing storage requires redeployment.
 
 ## Sources and validation
 
