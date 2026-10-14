@@ -4,9 +4,9 @@ import hashlib
 import os
 import shutil
 import tempfile
-import urllib.request
 import zipfile
 from pathlib import Path
+from fetch_asset import fetch
 
 URL = "https://github.com/DaniilSokolyuk/video2dlssnr/releases/download/v1.4.1/video2dlssnr-comfyui.zip"
 ARCHIVE_SHA256 = "4eda7e13d1d6bac229309297e33f51d1210987f86249b75dd03530a86302798b"
@@ -32,6 +32,55 @@ def sha256(path):
 def verify_archive(path):
     if path.stat().st_size != ARCHIVE_BYTES or sha256(path) != ARCHIVE_SHA256:
         raise RuntimeError("Upstream archive size/SHA-256 differs from verified v1.4.1; nothing installed.")
+
+
+def missing_binaries(node):
+    return [leaf for leaf, digest in FILES.items()
+            if not (node / "bin" / leaf).is_file()
+            or sha256(node / "bin" / leaf) != digest]
+
+
+def reuse_binaries(node, directories):
+    """Copy a complete verified set from old bin directories, or change nothing."""
+    missing = missing_binaries(node)
+    if not missing:
+        return True
+    sources = {}
+    for leaf in missing:
+        target = node / "bin" / leaf
+        if target.exists():
+            raise RuntimeError(f"Refusing to overwrite a different binary: {target}")
+        for directory in directories:
+            candidate = directory / leaf
+            if candidate.is_file() and sha256(candidate) == FILES[leaf]:
+                sources[leaf] = candidate
+                break
+    if len(sources) != len(missing):
+        return False
+    node.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="v2d-reuse-", dir=node) as temp:
+        staged = Path(temp)
+        for leaf, source in sources.items():
+            shutil.copyfile(source, staged / leaf)
+            if sha256(staged / leaf) != FILES[leaf]:
+                raise RuntimeError(f"Backup changed during copy: {source}")
+        (node / "bin").mkdir(exist_ok=True)
+        for leaf in sources:
+            os.replace(staged / leaf, node / "bin" / leaf)
+    print("Reused verified upstream binaries from local backup; ZIP download skipped.", flush=True)
+    return True
+
+
+def download_archive(archive, url):
+    # Before curl support, the installer used .part instead of .zip.part.
+    legacy = archive.with_suffix(".part")
+    partial = Path(str(archive) + ".part")
+    if legacy.is_file() and not partial.exists() and not archive.exists():
+        legacy.rename(partial)
+        print(f"Retained old download for resume: {partial}", flush=True)
+    print("Fetching verified upstream runtime asset: " + url, flush=True)
+    fetch(url, archive, ARCHIVE_SHA256)
+    verify_archive(archive)
 
 
 def install_archive(archive, node):
@@ -70,24 +119,23 @@ def main():
     parser.add_argument("--node", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--cache", type=Path, default=Path.home()/".cache/video2dlssnr")
     parser.add_argument("--archive", type=Path, help="Use a locally downloaded official archive")
+    parser.add_argument("--url", default=os.environ.get("V2D_RUNTIME_URL", URL),
+                        help="Alternate source for the same pinned v1.4.1 ZIP")
+    parser.add_argument("--reuse-binaries", type=Path, action="append", default=[],
+                        help="Try an old bin directory; verify every reused binary")
     args = parser.parse_args()
     try:
-        if all((args.node/"bin"/f).is_file() and sha256(args.node/"bin"/f) == h for f,h in FILES.items()):
+        missing = missing_binaries(args.node)
+        if not missing:
             print("All six upstream runtime binaries are already verified.")
+            return
+        print("Missing or mismatched runtime binaries: " + ", ".join(missing), flush=True)
+        if reuse_binaries(args.node, args.reuse_binaries):
             return
         archive = args.archive or args.cache/"video2dlssnr-comfyui-v1.4.1.zip"
         if not args.archive:
             args.cache.mkdir(parents=True, exist_ok=True)
-            try:
-                verify_archive(archive)
-            except (OSError, RuntimeError):
-                temporary = archive.with_suffix(".part")
-                request = urllib.request.Request(URL, headers={"User-Agent":"ComfyUI-DLSS-NeuralRender-Linux/0.1.0"})
-                print("Downloading verified upstream runtime asset: " + URL, flush=True)
-                with urllib.request.urlopen(request, timeout=120) as src, temporary.open("wb") as dst:
-                    shutil.copyfileobj(src,dst)
-                verify_archive(temporary)
-                temporary.replace(archive)
+            download_archive(archive, args.url)
         install_archive(archive, args.node)
         print("Six verified binaries installed; repository Python files retained.")
     except (OSError, RuntimeError, zipfile.BadZipFile) as exc:

@@ -53,7 +53,7 @@ bash setup_ubuntu24.sh install
 脚本会：
 
 1. 安装 Ubuntu 用户态依赖、Wine、Xvfb/Xauth、Vulkan/CAB 工具和 FFmpeg。
-2. 下载固定的 v1.4.1 ComfyUI 发布包，验证整个 ZIP 和六个二进制哈希，仅提取 `bin/`，不覆盖本项目 Python。
+2. 优先校验当前节点和 `~/ComfyUI/node_backups/video2dlssnr-*/bin/` 中的原版运行库。能凑齐六个匹配的二进制时直接复用，无需下载 ZIP；否则下载固定的 v1.4.1 ComfyUI 发布包，验证整个 ZIP 和六个二进制哈希，仅提取 `bin/`，不覆盖本项目 Python。
 3. 下载并校验 GE-Proton11-6 x86_64，使用其配套 Wine、DXVK、VKD3D-Proton、DXVK-NVAPI。
 4. 校验 NVIDIA 610.57.04 `.run` 包，仅 `--extract-only` 解压匹配的 `_nvngx.dll`，不运行 `nvidia-installer`，不安装 NVIDIA apt 包或替换宿主机驱动。
 5. 从微软 SDK CAB 获取并校验原生 x64 shader compiler，建立受本项目标记的专用 prefix。
@@ -85,6 +85,24 @@ bash setup_ubuntu24.sh install
 [SourceForge 镜像页面](https://sourceforge.net/projects/proton-ge-custom.mirror/files/GE-Proton11-6/GE-Proton11-6-x86_64.tar.gz/)列出的 SHA-256 与固定上游文件一致；镜像速度取决于服务器网络。不设置 `V2D_PROTON_URL` 时仍从官方 GitHub Release 获取。切换来源不会改变运行库版本或校验值。若来源不支持续传，脚本停止并保留部分文件，不自动从头覆盖。
 
 若在其他机器下载后上传，将完整文件放到 `$V2D_STATE/downloads/GE-Proton11-6-x86_64.tar.gz`（未设置 `V2D_STATE` 时为 `~/.local/share/video2dlssnr-linux-610.57.04/downloads/`）；安装时哈希校验通过会直接复用。
+
+### 上游 ZIP 下载慢或没有进度
+
+新版 `fetch_runtime.py` 使用 curl 显示进度并续传上游 ZIP，自动保留旧版的 `video2dlssnr-comfyui-v1.4.1.part` 进度。旧脚本运行中请先按 Ctrl+C，再 `git pull --ff-only` 后重跑安装。它会先检查原版节点备份；所有必需文件的哈希匹配时跳过 ZIP 下载。已有文件与固定版本不符会报出具体文件名并停止，不覆盖。
+
+原版备份放在其他位置时，`V2D_RUNTIME_DIR` 指定其 **bin 目录**：
+
+```bash
+V2D_RUNTIME_DIR='/actual/backup/video2dlssnr/bin' bash setup_ubuntu24.sh install
+```
+
+也可以在电脑浏览器从[上游 v1.4.1 Release](https://github.com/DaniilSokolyuk/video2dlssnr/releases/tag/v1.4.1)下载 `video2dlssnr-comfyui.zip`，上传服务器后指定：
+
+```bash
+V2D_RUNTIME_ARCHIVE='/root/downloads/video2dlssnr-comfyui.zip' bash setup_ubuntu24.sh install
+```
+
+该 ZIP 固定大小为 247413258 字节，SHA-256 为 `4eda7e13d1d6bac229309297e33f51d1210987f86249b75dd03530a86302798b`。`V2D_RUNTIME_URL` 可以指定同一 ZIP 的其他下载地址，仍必须通过相同校验。安装仍需 GE-Proton、NVIDIA 归档和微软 CAB；如需切换 GE-Proton 来源，继续保留前述 `V2D_PROTON_URL`。
 
 ### 3. 分层测试实际 NR
 
@@ -131,7 +149,7 @@ bash setup_ubuntu24.sh test
 
 ## Windows
 
-使用现有 ComfyUI Python 执行 `python fetch_runtime.py` 下载校验后的上游运行库，然后重启 ComfyUI。此时直接执行 EXE；不读取 Linux 配置，不启动 Wine。上游要求 NVIDIA RTX 与 Windows 驱动 616.56+；本项目未进行 Windows GPU 回归测试。
+使用现有 ComfyUI Python 执行 `python fetch_runtime.py` 下载校验后的上游运行库（需要 PATH 中的 curl），或用 `python fetch_runtime.py --archive C:/downloads/video2dlssnr-comfyui.zip` 安装已经下载的完整包，然后重启 ComfyUI。此时直接执行 EXE；不读取 Linux 配置，不启动 Wine。上游要求 NVIDIA RTX 与 Windows 驱动 616.56+；本项目未进行 Windows GPU 回归测试。
 
 ## 本地/CI 测试
 

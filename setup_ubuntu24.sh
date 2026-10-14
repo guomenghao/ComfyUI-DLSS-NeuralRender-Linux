@@ -9,7 +9,7 @@ py_exec="${V2D_PYTHON:-$(command -v python)}"
 mode="${1:-help}"
 if [[ "$mode" == help ]]; then
     printf '%s\n' 'Usage: bash setup_ubuntu24.sh install|test' \
-      'Optional: V2D_NODE_DIR, V2D_STATE, V2D_PYTHON, V2D_PROTON_URL.' \
+      'Optional: V2D_NODE_DIR, V2D_STATE, V2D_PYTHON, V2D_PROTON_URL, V2D_RUNTIME_URL, V2D_RUNTIME_ARCHIVE, V2D_RUNTIME_DIR.' \
       'install: dependencies, pinned downloads, code backup/deploy, dedicated prefix.' \
       'test: help -> production NR probe -> real image/video smoke test, stop on failure.'
     exit 0
@@ -42,7 +42,21 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     curl ca-certificates unzip tar xz-utils zstd cabextract xvfb xauth \
     wine64 wine winetricks libvulkan1 vulkan-tools ffmpeg
 mkdir -p "$state_dir/downloads" "$state_dir/runtime"
-"$py_exec" -u "$kit_dir/fetch_runtime.py" --node "$node_dir" --cache "$state_dir/downloads"
+runtime_args=(--node "$node_dir" --cache "$state_dir/downloads")
+if [[ -n "${V2D_RUNTIME_ARCHIVE:-}" ]]; then
+    runtime_args+=(--archive "$V2D_RUNTIME_ARCHIVE")
+fi
+if [[ -n "${V2D_RUNTIME_DIR:-}" ]]; then
+    runtime_args+=(--reuse-binaries "$V2D_RUNTIME_DIR")
+fi
+# The documented installation moves the original node outside custom_nodes.
+# Reuse only binaries matching ALL pinned hashes, never its Python code.
+for backup_bin in "$HOME/ComfyUI/node_backups"/video2dlssnr-*/bin; do
+    if [[ -d "$backup_bin" ]]; then
+        runtime_args+=(--reuse-binaries "$backup_bin")
+    fi
+done
+"$py_exec" -u "$kit_dir/fetch_runtime.py" "${runtime_args[@]}"
 "$py_exec" -u "$kit_dir/configure_local.py" check-node --node "$node_dir"
 fetch() {
     "$py_exec" -u "$kit_dir/fetch_asset.py" "$1" "$2" "$3"

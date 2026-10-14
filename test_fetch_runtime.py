@@ -45,5 +45,52 @@ class FetchRuntimeTests(unittest.TestCase):
                 runtime.install_archive(self.archive,self.node)
         self.assertEqual((self.node/"bin/worker.exe").read_bytes(),b"custom")
 
+    def test_backup_reuse_verifies_files_and_preserves_python(self):
+        donor = self.root / "backup" / "bin"
+        donor.mkdir(parents=True)
+        (donor / "worker.exe").write_bytes(b"MZworker")
+        with patch.object(runtime, "FILES", self.files):
+            self.assertTrue(runtime.reuse_binaries(self.node, [donor]))
+            self.assertEqual(runtime.missing_binaries(self.node), [])
+        self.assertEqual((self.node / "nodes.py").read_text(), "retain modified Python")
+        self.assertEqual((donor / "worker.exe").read_bytes(), b"MZworker")
+
+    def test_incomplete_or_bad_backup_leaves_node_untouched(self):
+        donor = self.root / "backup"
+        donor.mkdir()
+        (donor / "worker.exe").write_bytes(b"wrong")
+        with patch.object(runtime, "FILES", self.files):
+            self.assertFalse(runtime.reuse_binaries(self.node, [donor]))
+        self.assertFalse((self.node / "bin").exists())
+
+    def test_reuse_rejects_existing_modified_binary(self):
+        (self.node / "bin").mkdir()
+        target = self.node / "bin" / "worker.exe"
+        target.write_bytes(b"custom")
+        with patch.object(runtime, "FILES", self.files):
+            with self.assertRaisesRegex(RuntimeError, "Refusing"):
+                runtime.reuse_binaries(self.node, [])
+        self.assertEqual(target.read_bytes(), b"custom")
+
+    def test_old_zip_partial_is_retained_for_resume(self):
+        legacy = self.archive.with_suffix(".part")
+        legacy.write_bytes(b"previous progress")
+        partial = Path(str(self.archive) + ".part")
+        with patch.object(runtime, "fetch") as downloader, patch.object(runtime, "verify_archive"):
+            runtime.download_archive(self.archive, "https://example.com/pinned.zip")
+        self.assertFalse(legacy.exists())
+        self.assertEqual(partial.read_bytes(), b"previous progress")
+        downloader.assert_called_once_with("https://example.com/pinned.zip", self.archive, runtime.ARCHIVE_SHA256)
+
+    def test_new_partial_does_not_overwrite_old_partial(self):
+        legacy = self.archive.with_suffix(".part")
+        partial = Path(str(self.archive) + ".part")
+        legacy.write_bytes(b"old")
+        partial.write_bytes(b"new")
+        with patch.object(runtime, "fetch"), patch.object(runtime, "verify_archive"):
+            runtime.download_archive(self.archive, runtime.URL)
+        self.assertEqual(legacy.read_bytes(), b"old")
+        self.assertEqual(partial.read_bytes(), b"new")
+
 
 if __name__ == "__main__": unittest.main()
