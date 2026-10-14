@@ -228,7 +228,9 @@ def run_video_files(cmd, rgba, out_w, out_h, dtype, progress=None, log=None):
         # The batch pathname is the outer cmd /c command, before batch escaping.
         if any(char in batch_win for char in ('"', '%', '!', '\r', '\n')):
             raise RuntimeError("Wine file transport requires a temporary directory without quotes, %, ! or newlines; set TMPDIR=/tmp.")
-        p = RuntimeProcess(cmd[0], ["/d", "/s", "/c", '"' + batch_win + '"'],
+        # Wine quotes Linux argv when creating the Windows command line.
+        # Manually embedding quotes becomes literal \"...\" in Wine cmd.exe.
+        p = RuntimeProcess(cmd[0], ["/d", "/c", batch_win],
                            program="cmd.exe", stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         diagnostics = ""

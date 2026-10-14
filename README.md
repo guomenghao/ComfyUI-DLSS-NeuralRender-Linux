@@ -158,6 +158,10 @@ RTX 5090 / 610.57.04 的实机日志已证明 feature 18 的创建、求值及�
 
 参考：[Ubuntu libc6-i386](https://packages.ubuntu.com/noble/libc6-i386)、[包内加载器文件](https://packages.ubuntu.com/noble/amd64/libc6-i386/filelist)。当前方案直接调用 GE-Proton 的 Wine；[上游推荐通过 Steam/umu 的配套运行时启动](https://github.com/GloriousEggroll/proton-ge-custom/blob/GE-Proton11-6/README.md)，因此直接调用时需在宿主容器补齐系统共享库，仍属于实验性适配。
 
+### Wine 找不到带 `\"` 的 `run.cmd`
+
+这是旧文件传输实现把批处理路径手动加引号，再被 Wine 二次转义造成的启动错误，视频程序尚未执行。新版按独立 argv 传递 `/d /c` 和未手动加引号的 Windows 批处理路径，由 Wine 处理引用。更新源码后只重跑 `--video-only`，不需要重新安装运行库。新增 `test_real_wine.py` 使用 MinGW 编译真实 Windows 二进制，在 Wine 的 cmd 中验证原始字节和 stderr 隔离；该测试不调用 GPU 或 DLSS。
+
 ### 4. 重启 ComfyUI 并验证工作流
 
 按平台原有方式重启 ComfyUI，搜索 `video2dlssnr` 分类：

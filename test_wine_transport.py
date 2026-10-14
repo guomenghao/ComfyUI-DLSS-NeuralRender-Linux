@@ -32,7 +32,10 @@ def unix_path(raw):
 mode = os.environ.get('TEST_WORKER_MODE', 'normal')
 if sys.argv[1].lower() == 'cmd.exe':
     import re, subprocess
-    script = unix_path(args[-1].strip('"')).read_text(encoding='utf-8')
+    if '"' in args[-1] or '/s' in args:
+        print('Cannot recognize a manually quoted Wine cmd batch argument')
+        sys.exit(1)
+    script = unix_path(args[-1]).read_text(encoding='utf-8')
     line = next(line for line in script.splitlines() if line.startswith('"'))
     tokens = [token.replace('%%', '%') for token in re.findall(r'"([^"\r\n]*)"', line)]
     with unix_path(tokens[-3]).open('rb') as src, unix_path(tokens[-2]).open('wb') as dst, unix_path(tokens[-1]).open('wb') as err:
