@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+/bin/*
+!/bin/.gitkeep
+linux-runtime.json
+*.log
+*.part
+*.zip
+*.tar.gz
+*.run
+.env
+.venv/
