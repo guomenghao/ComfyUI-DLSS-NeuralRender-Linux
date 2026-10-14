@@ -1,243 +1,140 @@
-# ComfyUI-DLSS-NeuralRender-Linux
+# 影栈（CineStack）DLSS · ComfyUI 节点
 
-video2dlssnr v1.4.1 的实验性 Linux/Wine 适配节点，支持 DLSS Super Resolution + Neural Rendering 的图像及视频处理。Windows 仍直接调用上游 EXE。
+**将 NVIDIA DLSS Super Resolution 与 Neural Rendering 接入 ComfyUI 图像和视频工作流。**
 
-**状态：2026-10-14，用户的 Ubuntu 24.04 Docker / RTX 5090 / Linux 610.57.04 已通过 NR feature 18 探测、原生分辨率单图输出及两帧 SDR 视频处理。视频结果为 PASS：1280×720、2 FPS、2 帧、scale=1、Lucas–Kanade GPU 光流。放大、HDR、NVOF、音轨、长视频和视觉质量仍待验收。详见 [实机验证记录](VALIDATION.md)。GitHub CI 另行验证真实 Wine 二进制传输，不调用 GPU。**
+影栈（CineStack）DLSS 提供图像增强、视频时序处理和运行环境检查节点，可用于 AI 生成素材的后期处理。通过节点参数调整神经渲染风格、细节、色彩与输出尺寸，将处理结果继续交给 ComfyUI 的预览、保存和后续制作节点。
 
-上游：[DaniilSokolyuk/video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr)。这是独立的社区适配项目，不属于 NVIDIA 官方项目。
+本项目基于 [video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr) 构建，提供 Linux / Wine 适配与部署工具，并保留 Windows 原生执行方式。Linux 后端目前为实验性功能。
 
-2026-10-14 的源码复查、已修复的问题和仍需实机验证的范围见 [代码复查报告](CODE_REVIEW.md)。
+## 产品功能
 
-## 功能和边界
+- **图像处理**：处理单张图像或图像批次，提供 Neural Rendering 与 DLSS 超分相关参数。
+- **视频处理**：接收 ComfyUI `VIDEO` 或 `IMAGE` 帧批次，使用光流运动信息进行时序神经渲染，输出图像帧与 `VIDEO`。
+- **风格与细节控制**：提供风格、预设、强度、局部结构、局部色调、皮肤、细节和色彩参数。
+- **输出尺寸控制**：支持缩放比例及指定宽高，便于衔接后期制作流程。
+- **运行环境检查**：查看工作程序及运行库信息，辅助安装验收与问题定位。
+- **Linux 部署支持**：提供 Wine 运行配置、无桌面运行支持，以及可选的容器 NVENC 编码修复和启停工具。
 
-- 保留上游三个节点及原有 ID：`DLSSNR_Image`、`DLSSNR_Video`、`DLSSNR_RuntimeInfo`。
-- Linux 的工作程序通过 Wine 启动；ComfyUI、PyTorch 和视频编码仍原生运行。
-- 按实际 Wine 盘符转换图像路径；SDR 8-bit 和 HDR 16-bit 支持二进制管道及 Linux 专用原始帧文件传输。当前自动部署使用文件方式隔离 Wine 日志与帧数据，Windows 继续使用管道。
-- 无桌面环境可用 Xvfb 包装每次调用，明确筛选 NVIDIA GPU；只有工作子进程使用专用配置。
-- 提供进程超时、ComfyUI 任务取消检测和独立进程组清理；工作程序日志只保留有限尾部，修复上游 Runtime Check 的参数数量错误。
-- 不增加视频帧数，不修改或伪造 NVIDIA 驱动版本，不修改上游 EXE/DLL。
-- Git 仓库只保存源码。运行库按固定发布资产和 SHA-256 从上游下载。
+视频节点保持输入帧数。提高帧率的 DLSS Frame Generation 需使用独立的插帧节点；本项目的 Neural Rendering 节点负责图像与视频画面处理。
 
-## 当前自动安装目标
+## 节点一览
 
-Ubuntu 24.04、Linux x86-64、Docker、RTX 5090、NVIDIA **610.57.04**。容器应已能通过 `vulkaninfo --summary` 识别真实 NVIDIA GPU，并有配套 `libnvidia-ngx.so`。
+安装后，在 ComfyUI 的 `video2dlssnr` 分类中查找以下节点：
 
-自动安装脚本暂时只接受此驱动版本与发行版，遇到其他环境会停止；其他版本需按 [Linux 手动配置说明](LINUX.md) 另行验证。无桌面 Docker 下的上述短 SDR 测试已通过，HDR 及其他环境仍需验证。
+| 节点名称 | 用途 | 输入 / 输出 |
+| --- | --- | --- |
+| **DLSS Neural Rendering (Image)** | 单图及图像批次处理 | `IMAGE` → `IMAGE` |
+| **DLSS Neural Rendering (Video)** | 视频时序处理 | `VIDEO` 或 `IMAGE` → `IMAGE`、`VIDEO` |
+| **DLSS NR Runtime Check** | 运行环境检查 | 输出 `STRING` |
 
-## 从 GitHub 安装到当前机器
+保留上游节点 ID：`DLSSNR_Image`、`DLSSNR_Video`、`DLSSNR_RuntimeInfo`，方便衔接已有工作流。原版 `video2dlssnr` 与本项目使用相同 ID，请避免同时加载。
 
-在**实际运行 ComfyUI 的 Conda/venv 环境**中执行。系统依赖安装需要 root；下面适用于当前 `/root/ComfyUI`。
+## 安装要求
 
-### 1. 获取源码，处理原版节点冲突
+- 已安装 ComfyUI，并使用其实际运行的 Python 环境执行安装命令。
+- NVIDIA RTX 显卡及可用的配套图形运行库。
+- Linux 需要 Wine 与 NVIDIA Vulkan 支持；无桌面环境可使用 Xvfb。
+- 运行库首次安装需要网络连接和足够的磁盘空间。
 
-先在平台停止 ComfyUI 的当前生成任务。原版 `video2dlssnr` 与本项目使用相同节点 ID，只保留其中一个可加载目录。
+**自动安装配置的兼容范围**：当前 `setup_ubuntu24.sh` 仅适用于 Ubuntu 24.04、x86-64、RTX 5090 与 NVIDIA 驱动 610.57.04。其他 Linux 组合请参阅 [Linux 配置指南](LINUX.md)，需分别验证兼容性。此限制属于安装配置的适用范围。
+
+Windows 直接调用上游工作程序，无需 Wine。上游要求 NVIDIA RTX 与 Windows 驱动 616.56 或更高版本；本项目尚未完成 Windows GPU 回归验证。
+
+## 快速安装
+
+### 1. 下载节点
+
+将以下 `COMFYUI_DIR` 替换为自己的 ComfyUI 安装目录，然后执行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends git
-mkdir -p "$HOME/ComfyUI/node_backups"
-if [ -d "$HOME/ComfyUI/custom_nodes/video2dlssnr" ]; then
-  mv "$HOME/ComfyUI/custom_nodes/video2dlssnr" \
-    "$HOME/ComfyUI/node_backups/video2dlssnr-$(date +%Y%m%d-%H%M%S)"
-fi
-cd "$HOME/ComfyUI/custom_nodes"
+COMFYUI_DIR="/path/to/ComfyUI"
+cd "$COMFYUI_DIR/custom_nodes"
 git clone https://github.com/guomenghao/ComfyUI-DLSS-NeuralRender-Linux.git
 cd ComfyUI-DLSS-NeuralRender-Linux
 ```
 
-若新目录已经存在，不重复 clone；先检查它的 `git remote -v` 和本地修改。
+若已安装原版 `video2dlssnr`，先停止相关任务，将原版目录移到 `custom_nodes` 之外保存，避免重复节点冲突。
 
-### 2. 安装运行库、Wine 和本节点配置
+### 2. 安装运行库
+
+**Linux：符合自动安装配置要求时**，在 ComfyUI 的 Python 环境中执行：
 
 ```bash
 bash setup_ubuntu24.sh install
-```
-
-脚本会：
-
-1. 安装 Ubuntu 用户态依赖、Wine、32 位 glibc 加载器（`libc6-i386`）、Xvfb/Xauth、Vulkan/CAB 工具和 FFmpeg。
-2. 优先校验当前节点和 `~/ComfyUI/node_backups/video2dlssnr-*/bin/` 中的原版运行库。能凑齐六个匹配的二进制时直接复用，无需下载 ZIP；否则下载固定的 v1.4.1 ComfyUI 发布包，验证整个 ZIP 和六个二进制哈希，仅提取 `bin/`，不覆盖本项目 Python。
-3. 下载并校验 GE-Proton11-6 x86_64，使用其配套 Wine、DXVK、VKD3D-Proton、DXVK-NVAPI。
-4. 校验 NVIDIA 610.57.04 `.run` 包，仅 `--extract-only` 解压匹配的 `_nvngx.dll`，不运行 `nvidia-installer`，不安装 NVIDIA apt 包或替换宿主机驱动。
-5. 从微软 SDK CAB 获取并校验原生 x64 shader compiler **10.0.28000.2705**，建立受本项目标记的专用 prefix。旧版 6.3.9600 编译器不适用于本节点的多分量 UAV 光流着色器。
-6. 备份已有本机配置及驱动桥，写入 `linux-runtime.json`，每次 Wine 调用使用 Xvfb，GPU 选择 RTX 5090。首次设置 600 秒超时；重跑安装保留已有 `timeout_seconds`，其他环境字段按本部署方案重新生成。
-
-需要下载超过 1 GB 的运行文件及依赖，安装前预留至少 8 GiB 空间。所有配置与下载状态默认保存在：
-
-```text
-~/.local/share/video2dlssnr-linux-610.57.04/
-```
-
-可设置 `V2D_STATE` 指向空间足够的持久化目录；`V2D_PYTHON` 指定实际 ComfyUI Python。脚本不升级或重装 PyTorch。
-
-安装显示 `INSTALL COMPLETE` 才进入测试；出现 `FAILED` 则先处理对应日志。重跑会复用校验通过的下载及本项目管理的 prefix，不重新初始化已有图形 DLL。
-
-### GE-Proton 下载慢或中断
-
-GE-Proton11-6 压缩包约 509 MiB。安装脚本支持 `.part` 断点续传，连接失败会从最新下载位置重试；不再因一小时总超时丢失进度。GE-Proton、NVIDIA 驱动归档和微软 CAB 均使用此机制，完成后仍验证固定 SHA-256。
-
-正在运行旧脚本时，先按 **Ctrl+C**，保留状态目录中的 `.part` 文件，然后更新源码、改用 SourceForge 镜像续传：
-
-```bash
-cd "$HOME/ComfyUI/custom_nodes/ComfyUI-DLSS-NeuralRender-Linux"
-git pull --ff-only && \
-V2D_PROTON_URL='https://downloads.sourceforge.net/project/proton-ge-custom.mirror/GE-Proton11-6/GE-Proton11-6-x86_64.tar.gz' \
-bash setup_ubuntu24.sh install
-```
-
-[SourceForge 镜像页面](https://sourceforge.net/projects/proton-ge-custom.mirror/files/GE-Proton11-6/GE-Proton11-6-x86_64.tar.gz/)列出的 SHA-256 与固定上游文件一致；镜像速度取决于服务器网络。不设置 `V2D_PROTON_URL` 时仍从官方 GitHub Release 获取。切换来源不会改变运行库版本或校验值。若来源不支持续传，脚本停止并保留部分文件，不自动从头覆盖。
-
-若在其他机器下载后上传，将完整文件放到 `$V2D_STATE/downloads/GE-Proton11-6-x86_64.tar.gz`（未设置 `V2D_STATE` 时为 `~/.local/share/video2dlssnr-linux-610.57.04/downloads/`）；安装时哈希校验通过会直接复用。
-
-### 上游 ZIP 下载慢或没有进度
-
-新版 `fetch_runtime.py` 使用 curl 显示进度并续传上游 ZIP，自动保留旧版的 `video2dlssnr-comfyui-v1.4.1.part` 进度。旧脚本运行中请先按 Ctrl+C，再 `git pull --ff-only` 后重跑安装。它会先检查原版节点备份；所有必需文件的哈希匹配时跳过 ZIP 下载。已有文件与固定版本不符会报出具体文件名并停止，不覆盖。
-
-原版备份放在其他位置时，`V2D_RUNTIME_DIR` 指定其 **bin 目录**：
-
-```bash
-V2D_RUNTIME_DIR='/actual/backup/video2dlssnr/bin' bash setup_ubuntu24.sh install
-```
-
-也可以在电脑浏览器从[上游 v1.4.1 Release](https://github.com/DaniilSokolyuk/video2dlssnr/releases/tag/v1.4.1)下载 `video2dlssnr-comfyui.zip`，上传服务器后指定：
-
-```bash
-V2D_RUNTIME_ARCHIVE='/root/downloads/video2dlssnr-comfyui.zip' bash setup_ubuntu24.sh install
-```
-
-该 ZIP 固定大小为 247413258 字节，SHA-256 为 `4eda7e13d1d6bac229309297e33f51d1210987f86249b75dd03530a86302798b`。`V2D_RUNTIME_URL` 可以指定同一 ZIP 的其他下载地址，仍必须通过相同校验。安装仍需 GE-Proton、NVIDIA 归档和微软 CAB；如需切换 GE-Proton 来源，继续保留前述 `V2D_PROTON_URL`。
-
-### 3. 分层测试实际 NR
-
-```bash
 bash setup_ubuntu24.sh test
 ```
 
-依次运行 EXE 帮助页、上游生产路线 NR feature 18 探测、真实图像及两帧 SDR 视频处理；任一阶段失败即停止。不会启用上游诊断性的 `--probe-core`。
+安装系统依赖需要管理员权限，建议预留至少 8 GiB 空间。安装器使用固定版本与 SHA-256 校验的运行文件，配置专用 Wine 环境；保留现有 NVIDIA 驱动和 PyTorch。以 `INSTALL COMPLETE` 确认安装完成，并检查测试结果后再使用工作流。
 
-第三阶段使用 1280×720、2 帧、2 FPS 的合成无音轨样本，`scale=1`、`motion_engine=lk`；保存 PNG、MP4、工作日志和 JSON，并检查可解码视频的尺寸、帧数、帧率。它不替代真实视频的音轨、HDR、超分和视觉质量验收。
-
-```bash
-tail -n 100 "$HOME/.local/share/video2dlssnr-linux-610.57.04/install.log"
-tail -n 100 "$HOME/.local/share/video2dlssnr-linux-610.57.04/test.log"
-cat "$HOME/.local/share/video2dlssnr-linux-610.57.04/gpu-test/results.json"
-```
-
-使用自定义 `V2D_STATE` 时，相应替换日志目录。
-
-### 视频退出失败但 stderr 日志为空
-
-Wine 崩溃报告可能写入本应传输原始帧的 stdout。新版节点在任务失败时将有限的 stdout 预览附入异常和 `video-worker.log`，文本保留开头/结尾，二进制只显示前 64 字节的十六进制；不会把错误文本当作图片，也不会在成功时记录帧数据。
-
-如果 NR 探测和单图已通过，只重跑短视频即可。新目录保留此前结果：
+**Windows：**
 
 ```bash
-V2D_VIDEO_TEST_DIR="${V2D_STATE:-$HOME/.local/share/video2dlssnr-linux-610.57.04}/gpu-test-video-$(date +%Y%m%d-%H%M%S)"
-python -u smoke_gpu.py --node "$PWD" --output "$V2D_VIDEO_TEST_DIR" --video-only
-cat "$V2D_VIDEO_TEST_DIR/video-worker.log"
+python fetch_runtime.py
 ```
 
-这是获取失败证据的诊断增强，不代表视频故障已修复。`--video-only` 的报告标记测试范围，不重复单图和 NR 探测。
+该命令需要 PATH 中可用的 `curl`，用于下载并校验上游运行库。
 
-### 光流编译 `X3676` 与 stdout 日志混入
+### 3. 重启 ComfyUI
 
-RTX 5090 / 610.57.04 的实机日志已证明 feature 18 的创建、求值及单图输出成功；短视频随后在 `optflow up` 着色器报 `typed UAV loads are only allowed for single-component 32-bit element types`。安装器原先采用的 Windows 8.1 SDK 编译器为 6.3.9600.16384，现改为固定的微软 SDK **10.0.28000.2705**：CAB 9495635 字节，SHA-256 `d951f1eefc051643ed28a0ba8bee804097bb9d6e7ee309d5c1be04f8272c0486`；x64 DLL SHA-256 `3e56c1a0867aa04cbca948b3664fcac5d51275865cd044a45a3fd6ce636ee914`。旧下载保留在原路径，替换前备份 prefix 中的编译器。
+重启后搜索上述节点，即可加入工作流。
 
-同一日志还证明 Wine/程序诊断进入了 stdout 原始帧通道。新版自动部署在 `linux-runtime.json` 设置 `VIDEO2DLSSNR_VIDEO_TRANSPORT=files`，使用 Wine 内的 cmd 批处理将 stdin、stdout 和 stderr 分别绑定到本次任务的独立文件。整个视频仍由上游 `--nr-video` 一次处理，保留时序处理；不逐帧改用单图，不过滤混合流中的“疑似日志”。完成后检查退出状态与输出字节数，再读取原始帧。Wine 启动器日志单独捕获。
+## 使用示例
 
-文件方式需要临时磁盘容纳输入和输出 RGBA 帧，结束后自动清理本次临时目录；进度目前在完成时更新。支持普通空格、UTF-8 路径以及参数内的百分号、`&` 和 `!`；Windows 参数不能含双引号或换行，批处理自身所在临时目录还不能含 `%` 或 `!`，必要时设置 `TMPDIR=/tmp`。未配置该选项的 Linux 环境仍默认 `pipe`。新版文件方式及编译器更新已通过上述目标机器的两帧 SDR GPU 视频测试，测试范围见 [验证记录](VALIDATION.md)。
-
-更新后运行 `bash setup_ubuntu24.sh install` 获取约 9.1 MiB 的新 CAB、更新专用配置，再按上一节 `--video-only` 重跑。既有 GE-Proton 和 NVIDIA 大文件校验通过后复用。
-
-依据：[Winetricks 编译器更新记录](https://github.com/Winetricks/winetricks/issues/2522)、[微软 typed UAV loads 文档](https://learn.microsoft.com/en-us/windows/win32/direct3d12/typed-unordered-access-view-loads)。本仓库采用官方微软下载地址，并独立核验了 CAB、DLL 哈希与 x64 文件版本。
-
-### 初始化报 `/lib/ld-linux.so.2: could not open`
-
-这是当前直接调用 GE-Proton Wine 的环境缺少 32 位 glibc 加载器，发生在 prefix 初始化，尚未运行 DLSS。Ubuntu 24.04 amd64 可用 `apt-get install -y --no-install-recommends libc6-i386` 补齐；无需为这个加载器开启整个 i386 软件源。新版安装器已包含该依赖并在初始化前检查 `/lib/ld-linux.so.2`。
-
-更新源码后重跑 `bash setup_ubuntu24.sh install`，复用已校验的下载与本项目标记的 prefix，不删除运行库或 prefix。若仍失败，保留新日志；补齐加载器只解决此处缺失，其他 Wine 共享库和 GPU 功能仍需验收。
-
-微软 CAB 若提示 `possible ... extra bytes at end of file`，同时显示完整包 SHA-256 校验通过及 `All done, no errors`，该提示不是此处 Wine 初始化失败的原因。
-
-参考：[Ubuntu libc6-i386](https://packages.ubuntu.com/noble/libc6-i386)、[包内加载器文件](https://packages.ubuntu.com/noble/amd64/libc6-i386/filelist)。当前方案直接调用 GE-Proton 的 Wine；[上游推荐通过 Steam/umu 的配套运行时启动](https://github.com/GloriousEggroll/proton-ge-custom/blob/GE-Proton11-6/README.md)，因此直接调用时需在宿主容器补齐系统共享库，仍属于实验性适配。
-
-### Wine 找不到带 `\"` 的 `run.cmd`
-
-这是旧文件传输实现把批处理路径手动加引号，再被 Wine 二次转义造成的启动错误，视频程序尚未执行。新版按独立 argv 传递 `/d /c` 和未手动加引号的 Windows 批处理路径，由 Wine 处理引用。更新源码后只重跑 `--video-only`，不需要重新安装运行库。新增 `test_real_wine.py` 使用 MinGW 编译真实 Windows 二进制，在 Wine 的 cmd 中验证原始字节和 stderr 隔离；该测试不调用 GPU 或 DLSS。
-
-### 4. 重启 ComfyUI 并验证工作流
-
-按平台原有方式重启 ComfyUI，搜索 `video2dlssnr` 分类：
+**图像处理：**
 
 ```text
 Load Image → DLSS Neural Rendering (Image) → Save Image
-Load Video → DLSS Neural Rendering (Video) → Save Video
-DLSS NR Runtime Check → STRING
 ```
 
-先验证短 SDR 视频，再测试 `scale=1.5/2`、`auto/nvof` 和 HDR。检查实际分辨率、帧数、帧率、音轨及视觉效果。该节点不执行插帧。
+**视频处理：**
 
-## 更新与回滚
+```text
+Load Video → DLSS Neural Rendering (Video) → Save Video
+```
+
+建议先以短 SDR 样本、`scale=1` 及 `motion_engine=lk` 完成运行检查，再逐项调整风格与输出尺寸。
+
+| 常用参数 | 说明 |
+| --- | --- |
+| `style` / `preset` | 选择神经渲染风格和预设 |
+| `intensity` | 调整处理强度 |
+| `detail` / `color` | 调整细节与色彩处理比例 |
+| `scale` | 未指定宽高时的输出缩放比例 |
+| `width` / `height` | 指定输出尺寸；只指定一项时按输入比例计算另一项 |
+| `motion_engine` | 选择视频光流引擎 |
+| `adapter` | 选择工作程序使用的显卡索引 |
+
+连接 `VIDEO` 输入时，代码会将音频与帧率传递到 `VIDEO` 输出；使用 `IMAGE` 帧批次时，通过 `images_fps` 设置输出帧率元数据，帧数保持不变。HDR、音轨与超分路径请使用实际素材单独验收。
+
+## Linux 部署工具
+
+仓库提供运行库下载与校验、Wine 配置、GPU 冒烟测试，以及 `start.sh` / `stop.sh` 启停脚本。启停脚本放置在包含 `main.py` 的 ComfyUI 安装目录，可通过 `V2D_COMFY_PYTHON` 指定解释器。
+
+对于出现 `OpenEncodeSessionEx: unsupported device (2)` 的 Linux 容器，另提供可选的 FFmpeg GPU 枚举修复。通过实际 NVENC 编码测试后，可将已验证的运行配置接入手动启动和容器开机入口。详见 [容器 NVENC 与持久化启动指南](NVENC_CONTAINER.md)。
+
+Linux 运行方式与配置参数详见 [Linux 配置指南](LINUX.md)。
+
+## 兼容性与验证范围
+
+Linux 后端已完成原生分辨率单图、短 SDR 视频及 Lucas–Kanade 光流处理验证；可选 NVENC 工具已完成短 H.264 硬件编码与解码验证。
+
+超分放大、HDR、NVOF、音轨、长视频及不同硬件组合仍需分别验证。独立编码测试与 CI 不代表完整 ComfyUI 工作流已通过验收，画面质量也需根据实际素材评估。
+
+## 更新
+
+在本节点目录执行：
 
 ```bash
 git status --short
 git pull --ff-only
-bash setup_ubuntu24.sh install
-bash setup_ubuntu24.sh test
 ```
 
-只有源码更新、配置变更或新失败需要重复测试。更新后按平台方式重启 ComfyUI。
+更新前保留本地修改与运行配置。若更新涉及 Linux 运行库或配置，重新执行安装及相应测试，然后重启 ComfyUI。
 
-恢复原版时，停止相关任务，将本项目整个目录移到 `custom_nodes` 外，再把 `node_backups` 中原版目录移回。不要在 `custom_nodes` 内给旧版改名作为备份，否则仍可能加载重复节点。
+## 开源与致谢
 
-## ComfyUI 手动启动 / 停止脚本（Linux）
+感谢 [Daniil Sokolyuk / video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr) 提供上游实现，以及 Wine、GE-Proton、DXVK、VKD3D-Proton 和 DXVK-NVAPI 等项目。
 
-仓库提供独立的 `start.sh` 和 `stop.sh`，需要一起放到 **ComfyUI 根目录（包含 main.py 的目录）**，例如 `/root/ComfyUI`。它们不替代 `/start.d/comfyui.sh`，也不自动修改开机脚本。
+主体代码遵循 [MIT License](LICENSE)，保留上游版权声明。可选 NVENC 修复组件遵循 [GPL-3.0](NVENC_FIX_LICENSE.txt)。NVIDIA 及其他第三方运行库按各自许可使用，不随本仓库源码分发。
 
-下载前可以先备份根目录的同名文件；从本仓库根目录复制安装：
-
-```bash
-cp start.sh stop.sh "$HOME/ComfyUI/"
-chmod +x "$HOME/ComfyUI/start.sh" "$HOME/ComfyUI/stop.sh"
-cd "$HOME/ComfyUI"
-./start.sh
-./stop.sh
-# 重新启动：
-./stop.sh && ./start.sh
-```
-
-默认使用 `/root/miniconda3/bin/python`，在 Xvfb 下以 `--listen 0.0.0.0 --port 8188 --enable-manager` 启动，日志追加到 `comfy.log`。启动命令只确认进程已创建，服务是否就绪以日志为准。已有该目录/端口的 ComfyUI 时不重复启动；其他服务占用端口时停止启动。
-
-停止脚本也能识别开机脚本启动的实例：检查实际 Python 脚本、工作目录、端口及进程启动标识，然后尝试发送本机 `/interrupt`，终止匹配的 ComfyUI。20 秒内未退出则再次核对身份后发送 SIGKILL。本脚本启动的 Xvfb 进程组按保存的身份单独清理；不会对外部启动的实例使用整组信号，也不调用 `pkill python` 或 `wineserver -k`。过期状态文件不能把另一个端口的服务当作停止目标。
-
-可用 `V2D_COMFY_PYTHON`、`V2D_COMFY_PORT`、`V2D_COMFY_STOP_TIMEOUT` 调整解释器、端口、退出等待秒数；启停时需使用相同设置。`.comfyui-control/` 保存每个端口的锁和启动身份。该控制器使用 Linux `/proc`，不支持 Windows/macOS。
-
-回归使用合成 HTTP 服务和 Xvfb 包装器，检查重复启动、停止开机式外部实例、端口冲突、不同端口隔离、过期状态文件及超时终止，不执行真实 ComfyUI 或 GPU 推理。
-
-## 可选：容器内 NVENC 编码修复
-
-当原生 FFmpeg 返回 `OpenEncodeSessionEx: unsupported device (2)` 时，可按 [NVENC_CONTAINER.md](NVENC_CONTAINER.md) 尝试仅对 FFmpeg 启用 GPU 枚举修复。保留当前驱动，先实际编码和解码测试，通过后再接入插帧节点。2026-10-14，目标 Ubuntu 24.04 Docker / RTX 5090 / 610.57.04 已通过修正版的 256×256、1296×720 两个短 H.264 NVENC 编码及完整解码测试。ComfyUI 内联合 DLSSG + NVENC、音轨、HDR、其他编码器及长视频仍待验证；实机结果与 CI 分开记录。
-
-已通过 NVENC GPU 测试后，可执行 `python install_nvenc_startup.py`，将根目录 `start.sh`、`stop.sh`、持久化 FFmpeg 配置以及 `/start.d/comfyui.sh` 一起部署。开机脚本调用同一份 `start.sh`，自动加载已验证的包装器；原文件会备份。见 [持久化部署说明](NVENC_CONTAINER.md#persist-manual-and-container-startup-after-pass)。该安装器保留当前 NVIDIA 驱动，不全局设置 `LD_PRELOAD`。
-
-## Windows
-
-使用现有 ComfyUI Python 执行 `python fetch_runtime.py` 下载校验后的上游运行库（需要 PATH 中的 curl），或用 `python fetch_runtime.py --archive C:/downloads/video2dlssnr-comfyui.zip` 安装已经下载的完整包，然后重启 ComfyUI。此时直接执行 EXE；不读取 Linux 配置，不启动 Wine。上游要求 NVIDIA RTX 与 Windows 驱动 616.56+；本项目未进行 Windows GPU 回归测试。
-
-## 本地/CI 测试
-
-在已有 NumPy、PyTorch、Pillow 的环境中执行：
-
-```bash
-python -m unittest discover -s . -p 'test_*.py' -v
-bash -n setup_ubuntu24.sh
-```
-
-测试使用模拟 Wine 工作程序验证实际文件和子进程管道，包括 8-bit/16-bit、Xvfb 包装、错误输出、超时和配置隔离；GPU 冒烟测试单独由 `smoke_gpu.py` 执行。
-
-## 兼容性限制与许可
-
-上游 C++ 用 DXGI UMD 版本检查 Windows 616.56 门槛；Wine 的报告值不一定是真实 Linux 驱动版本。通过版本检查、帮助页或 CI 均不证明 NR 可以执行，需以真实 feature-18 和图像/视频结果为准。
-
-代码按 [MIT](LICENSE) 许可，保留上游作者声明；NVIDIA 和其他运行库按其自身条款使用，不随 Git 仓库提交。
-
-参考：[NVIDIA 解压选项](https://download.nvidia.com/XFree86/Linux-x86_64/610.57.04/README/installdriver.html)、[NGX Wine 组件](https://download.nvidia.com/XFree86/Linux-x86_64/610.57.04/README/installedcomponents.html)、[GE-Proton11-6](https://github.com/GloriousEggroll/proton-ge-custom/releases/tag/GE-Proton11-6)、[环境配置参考](https://github.com/Konohamaru04/ComfyUI-NVIDIA-DLSS-Frame-Interpolation/blob/main/docs/linux.md)。环境参考项目的成功不代表本项目已通过 GPU 验证。
+影栈（CineStack）为本节点的产品品牌。本项目独立开发与维护，未获得 NVIDIA 官方背书；NVIDIA、DLSS 及相关名称归其各自权利人所有。
