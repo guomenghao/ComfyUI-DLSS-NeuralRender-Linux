@@ -189,6 +189,30 @@ bash setup_ubuntu24.sh test
 
 恢复原版时，停止相关任务，将本项目整个目录移到 `custom_nodes` 外，再把 `node_backups` 中原版目录移回。不要在 `custom_nodes` 内给旧版改名作为备份，否则仍可能加载重复节点。
 
+## ComfyUI 手动启动 / 停止脚本（Linux）
+
+仓库提供独立的 `start.sh` 和 `stop.sh`，需要一起放到 **ComfyUI 根目录（包含 main.py 的目录）**，例如 `/root/ComfyUI`。它们不替代 `/start.d/comfyui.sh`，也不自动修改开机脚本。
+
+下载前可以先备份根目录的同名文件；从本仓库根目录复制安装：
+
+```bash
+cp start.sh stop.sh "$HOME/ComfyUI/"
+chmod +x "$HOME/ComfyUI/start.sh" "$HOME/ComfyUI/stop.sh"
+cd "$HOME/ComfyUI"
+./start.sh
+./stop.sh
+# 重新启动：
+./stop.sh && ./start.sh
+```
+
+默认使用 `/root/miniconda3/bin/python`，在 Xvfb 下以 `--listen 0.0.0.0 --port 8188 --enable-manager` 启动，日志追加到 `comfy.log`。启动命令只确认进程已创建，服务是否就绪以日志为准。已有该目录/端口的 ComfyUI 时不重复启动；其他服务占用端口时停止启动。
+
+停止脚本也能识别开机脚本启动的实例：检查实际 Python 脚本、工作目录、端口及进程启动标识，然后尝试发送本机 `/interrupt`，终止匹配的 ComfyUI。20 秒内未退出则再次核对身份后发送 SIGKILL。本脚本启动的 Xvfb 进程组按保存的身份单独清理；不会对外部启动的实例使用整组信号，也不调用 `pkill python` 或 `wineserver -k`。过期状态文件不能把另一个端口的服务当作停止目标。
+
+可用 `V2D_COMFY_PYTHON`、`V2D_COMFY_PORT`、`V2D_COMFY_STOP_TIMEOUT` 调整解释器、端口、退出等待秒数；启停时需使用相同设置。`.comfyui-control/` 保存每个端口的锁和启动身份。该控制器使用 Linux `/proc`，不支持 Windows/macOS。
+
+回归使用合成 HTTP 服务和 Xvfb 包装器，检查重复启动、停止开机式外部实例、端口冲突、不同端口隔离、过期状态文件及超时终止，不执行真实 ComfyUI 或 GPU 推理。
+
 ## Windows
 
 使用现有 ComfyUI Python 执行 `python fetch_runtime.py` 下载校验后的上游运行库（需要 PATH 中的 curl），或用 `python fetch_runtime.py --archive C:/downloads/video2dlssnr-comfyui.zip` 安装已经下载的完整包，然后重启 ComfyUI。此时直接执行 EXE；不读取 Linux 配置，不启动 Wine。上游要求 NVIDIA RTX 与 Windows 驱动 616.56+；本项目未进行 Windows GPU 回归测试。
