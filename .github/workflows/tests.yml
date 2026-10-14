@@ -17,3 +17,11 @@ jobs:
       - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: python -m unittest discover -s . -p 'test_*.py' -v
       - run: bash -n setup_ubuntu24.sh
+      - name: Install Wine and MinGW for real command redirection test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine wine64 xvfb xauth gcc-mingw-w64-x86-64
+      - name: Real Wine binary file transport (no GPU)
+        env:
+          V2D_TEST_REAL_WINE: '1'
+        run: python -m unittest test_real_wine -v
