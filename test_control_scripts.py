@@ -47,6 +47,22 @@ def unused_port():
 
 
 class ProcessIdentificationTests(unittest.TestCase):
+    def test_stop_does_not_pass_its_mode_argument_to_conda_activation(self):
+        with tempfile.TemporaryDirectory(prefix="v2d_activation_") as temp:
+            root = Path(temp)
+            activate = root / "activate"
+            marker = root / "activation-args"
+            activate.write_text('printf "%s\\n" "$*" > "' + str(marker) +
+                                '"\n[ "$#" = 1 ] && [ "$1" = base ] || return 7\n')
+            script = root / "start.sh"
+            text = (ROOT / "start.sh").read_text().replace('/root/miniconda3/bin/python', sys.executable)
+            text = text.replace('/root/miniconda3/bin/activate', str(activate))
+            script.write_text(text)
+            result = subprocess.run(["bash", str(script), "--stop"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5)
+            self.assertEqual(marker.read_text().strip(), "base")
+            self.assertNotEqual(result.returncode, 7, result.stdout)
+
     def test_older_kernel_pidfd_falls_back_after_identity_check(self):
         import errno
         record = {"pid": 43210}

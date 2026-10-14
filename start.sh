@@ -12,7 +12,7 @@ comfy_mode="${1:-start}"
 }
 if [[ "$comfy_python" == /root/miniconda3/bin/python && -f /root/miniconda3/bin/activate ]]; then
     set +u
-    source /root/miniconda3/bin/activate
+    source /root/miniconda3/bin/activate base
     set -u
 fi
 exec "$comfy_python" - "$comfy_mode" "$comfy_dir" "$comfy_python" <<'PY'
