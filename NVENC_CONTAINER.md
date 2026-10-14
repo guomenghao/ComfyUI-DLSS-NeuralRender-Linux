@@ -17,14 +17,25 @@ its license is retained in `NVENC_FIX_LICENSE.txt`. The other project source
 retains its existing license.
 
 Local changes check the complete ioctl code, RM control ABI, successful status,
-and NVIDIA control character device. GPU ID lookup uses the documented V2
-structure from NVIDIA's 610.57.04 headers. If this fails, the upstream heuristic
-PCI lookup is accepted only when every ID can be mapped without ambiguity;
-unknown or duplicate matches retain the original response. NVIDIA documents
-GPU IDs as opaque; this fallback is still an experimental heuristic, not an
-ABI guarantee. Immutable caches initialize before FFmpeg starts its threads.
+and NVIDIA control character device. GPU IDs remain opaque: the shim calls
+`GET_PCI_INFO` from NVIDIA's 610.57.04 headers, then matches the complete PCI
+**domain, bus and slot** against `/proc/driver/nvidia/gpus/*/information` to
+obtain the Linux `Device Minor`. It does not equate RM `deviceInstance` with a
+Linux minor, nor derive PCI addresses by shifting GPU IDs. All returned IDs
+must resolve without ambiguity before filtering; otherwise the original list
+is retained. Immutable caches initialize before FFmpeg starts its threads.
 Device existence is checked against actual character-device numbers and a
 successful open, rather than a pathname alone.
+
+### Target failure captured on 2026-10-14
+
+The first target trial did **not** pass. It exposed an error in the initial
+mapping: RM `deviceInstance=2` belonged to GPU ID `0x6a00`, while Linux device
+minor 2 belonged to PCI `0000:94:00.0`, GPU ID `0x9400`. The shim mistakenly
+retained `0x6a00`, causing CUDA initialization to return `CUDA_ERROR_NO_DEVICE`
+in the scoped FFmpeg process. The revised shim uses `GET_PCI_INFO` and a
+regression reproduces this eight-GPU ordering, including duplicate bus numbers
+across PCI domains. Real GPU acceptance of the revised code remains pending.
 
 ## Build and run the GPU test
 
@@ -68,7 +79,8 @@ fails. This optional helper does not change automatic startup configuration.
 - [NVIDIA device plugin issue #1282](https://github.com/NVIDIA/k8s-device-plugin/issues/1282)
   includes a user's successful LD_PRELOAD report and a maintainer's discussion.
 - [610.57.04 GPU control header](https://github.com/NVIDIA/open-gpu-kernel-modules/blob/610.57.04/src/common/sdk/nvidia/inc/ctrl/ctrl0000/ctrl0000gpu.h)
-  defines `GET_ATTACHED_IDS` and `GET_ID_INFO_V2`.
+  defines `GET_ATTACHED_IDS` and `GET_PCI_INFO`.
 - `test_nvenc_container.py` exercises synthetic RM calls, ioctl ABI boundaries,
-  unknown/ambiguous mappings, kernel-error preservation and wrapper scoping.
+  the reported broadcast-instance/minor mismatch, opaque IDs,
+  unknown/ambiguous PCI mappings, kernel-error preservation and wrapper scoping.
   These checks do not execute NVENC or grant access to real GPUs.

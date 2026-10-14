@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  * Based on flexgrip/nvidia-gpu-enumeration, commit
  * 1475091ae9e8fb23cc22d565adf932a488d00bcd (2026).
- * Local changes: exact ioctl/ABI/device checks; documented V2 ID lookup;
+ * Local changes: exact ioctl/ABI/device checks; documented PCI ID lookup;
  * unambiguous PCI fallback; partial lookup handling; initialize before threads.
  * GPL terms: NVENC_FIX_LICENSE.txt. This is an experimental userspace workaround.
  */
@@ -10,7 +10,7 @@
  *
  * Problem: On NVIDIA driver >= 570, when NVENC initializes inside a container
  * that has only 1 GPU assigned, libnvidia-encode queries /dev/nvidiactl for
- * ALL host GPUs (NV0000_CTRL_CMD_GPU_GET_ATTACHED_IDS, cmd 0x2A). When it
+ * ALL host GPUs (NV0000_CTRL_CMD_GPU_GET_ATTACHED_IDS, RM ioctl 0x2A, command 0x0201). When it
  * sees multiple GPUs, it tries to peer-init with the others, fails because
  * their /dev/nvidiaX nodes aren't mounted, and returns NV_ENC_ERR_UNSUPPORTED_DEVICE.
  *
@@ -83,23 +83,19 @@ typedef struct {
     NvU32 gpuIds[NV0000_CTRL_GPU_MAX_ATTACHED_GPUS];
 } NV0000_CTRL_GPU_GET_ATTACHED_IDS_PARAMS;
 
-/* NV0000_CTRL_CMD_GPU_GET_ID_INFO = 0x0202
- * Used to map a gpuId to its device instance (i.e. the X in /dev/nvidiaX) */
-#define NV0000_CTRL_CMD_GPU_GET_ID_INFO 0x0205 /* documented GET_ID_INFO_V2 */
+/* 610.57.04: GET_PCI_INFO returns a PCI address for an opaque GPU ID.
+ * deviceInstance is an RM broadcast instance, not the Linux device minor.
+ */
+#define NV0000_CTRL_CMD_GPU_GET_PCI_INFO 0x021b
 
 typedef struct {
     NvU32 gpuId;
-    NvU32 gpuFlags;
-    NvU32 deviceInstance;
-    NvU32 subDeviceInstance;
-    NvU32 sliStatus;
-    NvU32 boardId;
-    NvU32 gpuInstance;
-    int32_t numaId;
-} NV0000_CTRL_GPU_GET_ID_INFO_PARAMS;
+    NvU32 domain;
+    uint16_t bus;
+    uint16_t slot;
+} NV0000_CTRL_GPU_GET_PCI_INFO_PARAMS;
 _Static_assert(sizeof(NVOS54_PARAMETERS) == 32, "Linux x64 RM control ABI");
-_Static_assert(sizeof(NV0000_CTRL_GPU_GET_ID_INFO_PARAMS) == 32, "V2 GPU ID ABI");
-
+_Static_assert(sizeof(NV0000_CTRL_GPU_GET_PCI_INFO_PARAMS) == 12, "GPU PCI ABI");
 
 /* ============================================================
  * Logging
@@ -203,41 +199,6 @@ static uint32_t get_available_devices(void) {
 }
 
 /* ============================================================
- * Try to resolve a gpuId to a device instance using
- * NV0000_CTRL_CMD_GPU_GET_ID_INFO (cmd 0x0202).
- *
- * We need the nvidiactl fd and a valid RM client handle.
- * We extract these from the original ioctl call.
- *
- * Returns: device instance on success, (NvU32)-1 on failure.
- * ============================================================ */
-
-static NvU32 resolve_gpu_id_to_device(int fd, NvHandle hClient, NvU32 gpuId) {
-    NV0000_CTRL_GPU_GET_ID_INFO_PARAMS id_info;
-    memset(&id_info, 0, sizeof(id_info));
-    id_info.gpuId = gpuId;
-
-    /* GET_ID_INFO is a client-level control: hObject must equal hClient */
-    NVOS54_PARAMETERS ctrl;
-    memset(&ctrl, 0, sizeof(ctrl));
-    ctrl.hClient    = hClient;
-    ctrl.hObject    = hClient;  /* root client object, NOT the subdevice */
-    ctrl.cmd        = NV0000_CTRL_CMD_GPU_GET_ID_INFO;
-    ctrl.params     = &id_info;
-    ctrl.paramsSize = sizeof(id_info);
-
-    unsigned long req = _IOC(_IOC_READ | _IOC_WRITE, NV_IOCTL_MAGIC, NV_ESC_RM_CONTROL, sizeof(NVOS54_PARAMETERS));
-    int ret = real_ioctl(fd, req, &ctrl);
-    if (ret != 0 || ctrl.status != 0) {
-        log_msg("GET_ID_INFO failed for gpuId 0x%x: ioctl=%d status=0x%x", gpuId, ret, ctrl.status);
-        return (NvU32)-1;
-    }
-
-    log_msg("gpuId 0x%x -> deviceInstance %u", gpuId, id_info.deviceInstance);
-    return id_info.deviceInstance;
-}
-
-/* ============================================================
  * Parse /proc/driver/nvidia/gpus/ to build a mapping from
  * PCI bus location → Device Minor number.
  *
@@ -322,54 +283,37 @@ static void load_gpu_map(void) {
     log_msg("loaded %d GPU entries from /proc", gpu_map_count);
 }
 
-/*
- * Given a gpuId from GET_ATTACHED_IDS, try to match it to a Device Minor
- * by extracting the PCI bus number encoded in the gpuId.
- *
- * From observed data:
- *   gpuId 0x11800 → bus 0x18, gpuId 0x11900 → bus 0x19, etc.
- *   gpuId 0x300   → bus 0x03, gpuId 0x400   → bus 0x04, etc.
- *
- * The bus number appears to be encoded in bits 8+, specifically:
- *   bus = gpuId >> 8  (masking off the lower byte which is always 0x00)
- *
- * But the full encoding may also include domain/slot info in higher bits.
- * We try matching just the bus number against our proc map.
- *
- * Returns: device minor on success, -1 on failure.
- */
-static int match_gpuid_to_minor(NvU32 gpuId) {
+/* Exact PCI domain, bus and slot matching; reject duplicate functions too. */
+static int match_pci_to_minor(NvU32 domain, unsigned int bus, unsigned int slot) {
     load_gpu_map();
-
-    /* Extract what we think is the bus number */
-    unsigned int extracted_bus = (gpuId >> 8) & 0xFF;
-
-    /* Also try the full value shifted: some gpuIds encode domain+bus */
-    unsigned int extracted_full = gpuId >> 8;
-
     int matched = -1, count = 0;
-    /* Full domain+bus match first. Do not pick the first duplicate bus. */
     for (int i = 0; i < gpu_map_count; i++) {
-        unsigned int combined = (gpu_map[i].domain << 8) | gpu_map[i].bus;
-        if (combined == extracted_full) {
+        if (gpu_map[i].domain == domain && gpu_map[i].bus == bus &&
+            gpu_map[i].slot == slot) {
             matched = gpu_map[i].device_minor;
             count++;
         }
     }
-    if (count == 1) return matched;
-    if (count > 1) return -1;
-    count = 0;
-    for (int i = 0; i < gpu_map_count; i++) {
-        if (gpu_map[i].bus == extracted_bus) {
-            matched = gpu_map[i].device_minor;
-            count++;
-        }
-    }
-    if (count == 1) return matched;
+    return count == 1 ? matched : -1;
+}
 
-    log_msg("gpuId 0x%x: no /proc match found (extracted bus=0x%02x, full=0x%x)",
-            gpuId, extracted_bus, extracted_full);
-    return -1;
+static int resolve_gpu_id_to_minor(int fd, NvHandle hClient, NvU32 gpuId) {
+    NV0000_CTRL_GPU_GET_PCI_INFO_PARAMS pci = { .gpuId = gpuId };
+    NVOS54_PARAMETERS query = { .hClient = hClient, .hObject = hClient,
+        .cmd = NV0000_CTRL_CMD_GPU_GET_PCI_INFO, .params = &pci,
+        .paramsSize = sizeof(pci) };
+    unsigned long request = _IOC(_IOC_READ | _IOC_WRITE, NV_IOCTL_MAGIC,
+                                NV_ESC_RM_CONTROL, sizeof(query));
+    int result = real_ioctl(fd, request, &query);
+    if (result != 0 || query.status != 0) {
+        log_msg("GET_PCI_INFO failed for gpuId 0x%x: ioctl=%d status=0x%x; not filtering",
+                gpuId, result, query.status);
+        return -1;
+    }
+    int device_minor = match_pci_to_minor(pci.domain, pci.bus, pci.slot);
+    log_msg("gpuId 0x%x -> PCI %04x:%02x:%02x -> Device Minor %d",
+            gpuId, pci.domain, pci.bus, pci.slot, device_minor);
+    return device_minor;
 }
 
 /* ============================================================
@@ -446,59 +390,29 @@ int ioctl(int fd, unsigned long request, ...) {
         return ret;
     }
 
-    /*
-     * Strategy 1: Try GET_ID_INFO ioctl to map gpuId → deviceInstance.
-     * Strategy 2: If that fails, use /proc/driver/nvidia/gpus/ to map
-     *             gpuId → PCI bus → Device Minor.
-     * Strategy 3: If both fail, we can't determine which GPU is ours,
-     *             so we don't filter (fail-safe, same as no fix).
+    /* GPU IDs remain opaque: ask RM for PCI coordinates, then read the
+     * corresponding Linux minor from /proc. Never equate deviceInstance
+     * with a minor, and never derive bus numbers by shifting GPU IDs.
      */
-
     NvU32 filtered[NV0000_CTRL_GPU_MAX_ATTACHED_GPUS];
     int filtered_count = 0;
-    int resolve_failures = 0;
-
-    /* Strategy 1: ioctl-based resolve */
     for (int i = 0; i < total_host_gpus; i++) {
-        NvU32 dev_inst = resolve_gpu_id_to_device(fd, ctrl->hClient, gpu_params->gpuIds[i]);
-
-        if (dev_inst == (NvU32)-1) {
-            resolve_failures++;
-            continue;
+        int device_minor = resolve_gpu_id_to_minor(fd, ctrl->hClient, gpu_params->gpuIds[i]);
+        if (device_minor < 0) {
+            log_msg("WARNING: incomplete or ambiguous PCI map; original GPU list retained");
+            return ret;
         }
-
-        if (dev_inst < 32 && (available & (1u << dev_inst))) {
-            log_msg("KEEPING gpuId 0x%x (deviceInstance %u via ioctl)", gpu_params->gpuIds[i], dev_inst);
+        if (device_minor < 32 && (available & (1u << device_minor))) {
+            log_msg("KEEPING gpuId 0x%x (Device Minor %d via PCI)",
+                    gpu_params->gpuIds[i], device_minor);
             filtered[filtered_count++] = gpu_params->gpuIds[i];
         } else {
-            log_msg("REMOVING gpuId 0x%x (deviceInstance %u - not in container)", gpu_params->gpuIds[i], dev_inst);
+            log_msg("REMOVING gpuId 0x%x (Device Minor %d not accessible)",
+                    gpu_params->gpuIds[i], device_minor);
         }
     }
-
-    /* Strategy 2: /proc-based matching if ioctl failed */
-    if (resolve_failures > 0) {
-        log_msg("ID lookup incomplete, trying /proc-based matching");
-        filtered_count = 0;
-
-        for (int i = 0; i < total_host_gpus; i++) {
-            int dev_minor = match_gpuid_to_minor(gpu_params->gpuIds[i]);
-
-            if (dev_minor >= 0 && dev_minor < 32 && (available & (1u << dev_minor))) {
-                log_msg("KEEPING gpuId 0x%x (minor %d via /proc)", gpu_params->gpuIds[i], dev_minor);
-                filtered[filtered_count++] = gpu_params->gpuIds[i];
-            } else if (dev_minor >= 0) {
-                log_msg("REMOVING gpuId 0x%x (minor %d - not in container)", gpu_params->gpuIds[i], dev_minor);
-            }
-            if (dev_minor < 0) {
-                log_msg("WARNING: incomplete or ambiguous GPU map; not filtering");
-                return ret;
-            }
-        }
-    }
-
-    /* Strategy 3: If we still have nothing, don't filter */
     if (filtered_count == 0) {
-        log_msg("WARNING: could not determine correct GPU, not filtering (NVENC may fail)");
+        log_msg("WARNING: no accessible PCI GPU matched; original GPU list retained");
         return ret;
     }
 

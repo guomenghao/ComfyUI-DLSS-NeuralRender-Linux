@@ -53,25 +53,48 @@ static int backend(int fd, unsigned long request, ...) {
     if (request != valid_request()) return 0;
     va_list ap; va_start(ap, request);
     NVOS54_PARAMETERS *c = va_arg(ap, void *); va_end(ap);
-    if (!c || c->cmd != 0x205) return 0;
-    assert(c->paramsSize == 32);
-    NV0000_CTRL_GPU_GET_ID_INFO_PARAMS *info = c->params;
+    if (!c || c->cmd == 0x201) return 0;
+    assert(c->cmd == 0x21b); /* No use of broadcast deviceInstance as an OS minor. */
+    assert(c->paramsSize == 12);
+    NV0000_CTRL_GPU_GET_PCI_INFO_PARAMS *info = c->params;
     if (resolution_failure) { c->status = 0x1f; return 0; }
-    info->deviceInstance = info->gpuId == 0x9400 ? 2 : 7;
-    c->status = 0; return 0;
+    switch (info->gpuId) {
+    case 0x4000: info->domain=0; info->bus=0x40; break;
+    case 0x9400: case 0xDEADC0DE: info->domain=0; info->bus=0x94; break;
+    case 0x6a00: info->domain=0; info->bus=0x6a; break;
+    case 0xbe00: info->domain=0; info->bus=0xbe; break;
+    case 0x11600: info->domain=1; info->bus=0x16; break;
+    case 0x14000: info->domain=1; info->bus=0x40; break;
+    case 0x19400: info->domain=1; info->bus=0x94; break;
+    case 0x1be00: info->domain=1; info->bus=0xbe; break;
+    default: assert(0);
+    }
+    info->slot=0; c->status=0; return 0;
 }
 static void original(NV0000_CTRL_GPU_GET_ATTACHED_IDS_PARAMS *p) {
-    for (int i=0; i<32; i++) p->gpuIds[i] = 0xffffffff;
-    p->gpuIds[0] = 0x500; p->gpuIds[1] = 0x9400;
+    const NvU32 ids[] = {0x4000,0x9400,0x6a00,0xbe00,0x11600,0x14000,0x19400,0x1be00};
+    for (int i=0; i<32; i++) p->gpuIds[i] = i<8 ? ids[i] : 0xffffffff;
+}
+static void proc_map(void) {
+    /* /proc minors do not equal the RM broadcast-instance order in this log. */
+    const unsigned int domains[]={0,0,0,0,1,1,1,1};
+    const unsigned int buses[]={0x40,0x6a,0x94,0xbe,0x16,0x40,0x94,0xbe};
+    gpu_map_loaded=1; gpu_map_count=8;
+    for (int i=0; i<8; i++) gpu_map[i]=(gpu_proc_entry_t){
+        .domain=domains[i],.bus=buses[i],.slot=0,.func=0,.device_minor=i};
 }
 int main(void) {
     real_ioctl = backend;
+    proc_map();
     NV0000_CTRL_GPU_GET_ATTACHED_IDS_PARAMS p; original(&p);
     NVOS54_PARAMETERS c = {.hClient=1, .hObject=1, .cmd=0x201,
                            .params=&p, .paramsSize=128, .status=0};
     assert(interposed_ioctl(123, valid_request(), &c) == 0);
     assert(p.gpuIds[0] == 0x9400 && p.gpuIds[1] == 0xffffffff);
-    puts("filter only the available character device: PASS");
+    puts("real eight-GPU instance/minor mismatch selects PCI 0000:94, not 0000:6a: PASS");
+    original(&p); p.gpuIds[1]=0xDEADC0DE;
+    assert(interposed_ioctl(123, valid_request(), &c) == 0 && p.gpuIds[0] == 0xDEADC0DE);
+    puts("opaque GPU ID is resolved through PCI query, never shifted: PASS");
 
     /* Success from another ioctl namespace must never dereference this pointer. */
     assert(interposed_ioctl(123, _IOC(_IOC_READ|_IOC_WRITE,'X',0x2A,32), (void*)1) == 0);
@@ -79,11 +102,11 @@ int main(void) {
     puts("wrong ioctl magic/size is untouched: PASS");
 
     original(&p); c.paramsSize=4;
-    assert(interposed_ioctl(123, valid_request(), &c) == 0 && p.gpuIds[0] == 0x500);
+    assert(interposed_ioctl(123, valid_request(), &c) == 0 && p.gpuIds[0] == 0x4000);
     c.paramsSize=128; c.flags=4;
-    assert(interposed_ioctl(123, valid_request(), &c) == 0 && p.gpuIds[0] == 0x500);
+    assert(interposed_ioctl(123, valid_request(), &c) == 0 && p.gpuIds[0] == 0x4000);
     c.flags=0;
-    assert(interposed_ioctl(124, valid_request(), &c) == 0 && p.gpuIds[0] == 0x500);
+    assert(interposed_ioctl(124, valid_request(), &c) == 0 && p.gpuIds[0] == 0x4000);
     puts("wrong parameter ABI/flags/device is untouched: PASS");
 
     backend_failure=1; errno=0;
@@ -94,11 +117,13 @@ int main(void) {
     gpu_map_loaded=1; gpu_map_count=2;
     gpu_map[0]=(gpu_proc_entry_t){.domain=0,.bus=0x94,.slot=0,.func=0,.device_minor=2};
     gpu_map[1]=(gpu_proc_entry_t){.domain=0,.bus=0x94,.slot=1,.func=0,.device_minor=7};
-    assert(match_gpuid_to_minor(0x9400) == -1);
+    assert(match_pci_to_minor(0, 0x94, 0) == 2);
+    gpu_map[1].slot=0;
+    assert(match_pci_to_minor(0, 0x94, 0) == -1);
     puts("ambiguous PCI matching is refused: PASS");
 
     resolution_failure=1; gpu_map_count=0; original(&p);
-    assert(interposed_ioctl(123, valid_request(), &c) == 0 && p.gpuIds[0] == 0x500
+    assert(interposed_ioctl(123, valid_request(), &c) == 0 && p.gpuIds[0] == 0x4000
            && p.gpuIds[1] == 0x9400);
     puts("unknown mappings retain the original response: PASS");
     return 0;
@@ -145,7 +170,7 @@ class NvencContainerTests(unittest.TestCase):
                            capture_output=True, text=True)
             result = subprocess.run([str(root / "harness")], check=True,
                                     capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.stdout.count("PASS"), 6, result.stdout)
+            self.assertEqual(result.stdout.count("PASS"), 7, result.stdout)
 
 
 if __name__ == "__main__":
