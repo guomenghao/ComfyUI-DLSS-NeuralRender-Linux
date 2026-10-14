@@ -101,10 +101,11 @@ class RealWineFileTransportTests(unittest.TestCase):
                     self.assertEqual(p.returncode, 0)
                     self.assertLessEqual(len(stdout), 4096)
                     self.assertLessEqual(len(stderr), 4096)
-                    # Wine/Xvfb can append their own teardown diagnostics after
-                    # the program exits; the bounded tail must retain markers.
-                    self.assertIn(b"OUT_END", stdout, repr(stdout[-512:]))
-                    self.assertIn(b"ERR_END", stderr, repr(stderr[-512:]))
+                    # Wine can route Windows stdout/stderr into one Unix pipe.
+                    # Only cmd's explicit file redirection guarantees separation.
+                    diagnostic_tail = stdout + stderr
+                    self.assertIn(b"OUT_END", diagnostic_tail, repr(diagnostic_tail[-512:]))
+                    self.assertIn(b"ERR_END", diagnostic_tail, repr(diagnostic_tail[-512:]))
                 finally:
                     p.close_worker()
 
