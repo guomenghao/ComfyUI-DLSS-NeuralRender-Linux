@@ -213,6 +213,10 @@ cd "$HOME/ComfyUI"
 
 回归使用合成 HTTP 服务和 Xvfb 包装器，检查重复启动、停止开机式外部实例、端口冲突、不同端口隔离、过期状态文件及超时终止，不执行真实 ComfyUI 或 GPU 推理。
 
+## 可选：容器内 NVENC 编码修复
+
+当原生 FFmpeg 返回 `OpenEncodeSessionEx: unsupported device (2)` 时，可按 [NVENC_CONTAINER.md](NVENC_CONTAINER.md) 尝试仅对 FFmpeg 启用 GPU 枚举修复。保留当前驱动，先实际编码和解码测试，通过后再接入插帧节点。该方案仍待目标机器验证；源码编译和 CI 不代表 GPU 编码成功。
+
 ## Windows
 
 使用现有 ComfyUI Python 执行 `python fetch_runtime.py` 下载校验后的上游运行库（需要 PATH 中的 curl），或用 `python fetch_runtime.py --archive C:/downloads/video2dlssnr-comfyui.zip` 安装已经下载的完整包，然后重启 ComfyUI。此时直接执行 EXE；不读取 Linux 配置，不启动 Wine。上游要求 NVIDIA RTX 与 Windows 驱动 616.56+；本项目未进行 Windows GPU 回归测试。
