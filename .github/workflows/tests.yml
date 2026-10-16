@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - run: python -m pip install numpy Pillow
+      - run: python -m pip install numpy Pillow av
       - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: python -m unittest discover -s . -p 'test_*.py' -v
       - run: bash -n setup_ubuntu24.sh

@@ -256,7 +256,7 @@ def _batch_quote(value):
     return '"' + value.replace('%', '%%') + '"'
 
 
-def run_video_files(cmd, frames, out_w, out_h, dtype, progress=None, log=None):
+def run_video_files(cmd, frames, out_w, out_h, dtype, progress=None, log=None, sink=None):
     """Windows cmd redirects raw frames to private files, isolating Wine logs."""
     env, _ = worker_settings()
     prefix = Path(env["WINEPREFIX"]).expanduser()
@@ -319,21 +319,25 @@ def run_video_files(cmd, frames, out_w, out_h, dtype, progress=None, log=None):
                 except Exception as exc:
                     if log is not None:
                         log.append(f"Progress callback failed: {exc}")
-            result = np.empty((b, out_h, out_w, 3), dtype=dtype)
+            result = np.empty((b, out_h, out_w, 3), dtype=dtype) if sink is None else None
             with output_path.open("rb") as stream:
                 for index in range(b):
                     check_comfy_cancelled()
                     data = np.fromfile(stream, dtype=dtype, count=out_h * out_w * 4)
                     if data.size != out_h * out_w * 4:
                         raise RuntimeError("Worker output was truncated while reading frames.")
-                    result[index] = data.reshape(out_h, out_w, 4)[..., :3]
+                    rgb = data.reshape(out_h, out_w, 4)[..., :3]
+                    if sink is None:
+                        result[index] = rgb
+                    else:
+                        sink(rgb)
             return result
         finally:
             p.close_worker()
 
 
 def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adapter=0,
-                 progress=None, log=None, height=0, transfer=None, sdr_white=203.0):
+                 progress=None, log=None, height=0, transfer=None, sdr_white=203.0, sink=None):
     """RGB [B,H,W,3] frames streamed through --nr-video; returns RGB [B,H',W',3] of the same dtype.
 
     uint8 frames are SDR (sRGB) and travel 8-bit. uint16 frames carry PQ / HLG code values and
@@ -341,7 +345,9 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
     the frame count as the tool reports it; `log`, if a list, receives the tool's non-progress
     stderr lines (backend in use, final tally, any warnings).
     """
-    validate_frames(frames, 4, transfer)
+    from .stream_video import FrameSource
+    if not isinstance(frames, FrameSource):
+        validate_frames(frames, 4, transfer)
     check_comfy_cancelled()
     b, h, w, _ = frames.shape
     wide = frames.dtype == np.uint16
@@ -365,25 +371,29 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
         if transport not in {"pipe", "files"}:
             raise ValueError("VIDEO2DLSSNR_VIDEO_TRANSPORT must be pipe or files.")
         if transport == "files":
-            return run_video_files(cmd, frames, out_w, out_h, frames.dtype, progress, log)
+            return run_video_files(cmd, frames, out_w, out_h, frames.dtype, progress, log, sink=sink)
     need = b * out_w * out_h * bpp
-    buf = bytearray(need)
+    frame_bytes = out_w * out_h * bpp
+    buf = bytearray(need if sink is None else frame_bytes)
     view = memoryview(buf)
     got = 0
     p = RuntimeProcess(exe, cmd[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, **cancellation_settings())
     err = deque(maxlen=100)
+    feed_errors = []
 
     def feed():
         try:
             scratch = np.empty((h, w, 4), dtype=frames.dtype)
             scratch[..., 3] = 65535 if wide else 255
-            for i in range(b):
-                scratch[..., :3] = frames[i]
+            for frame in frames:
+                check_comfy_cancelled()
+                scratch[..., :3] = frame
                 p.stdin.write(scratch.tobytes())
             p.stdin.close()
-        except (BrokenPipeError, OSError):
-            pass
+        except BaseException as exc:
+            feed_errors.append(exc)
+            p.abort()
 
     def drain():
         prog = re.compile(rb"^NRPROG (\d+) ")
@@ -407,10 +417,14 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
 
     try:
         while got < need:
-            n = p.stdout.readinto(view[got:])
+            start = got if sink is None else got % frame_bytes
+            n = p.stdout.readinto(view[start:])
             if not n:
                 break
             got += n
+            if sink is not None and got % frame_bytes == 0:
+                check_comfy_cancelled()
+                sink(np.frombuffer(buf, frames.dtype).reshape(out_h, out_w, 4)[..., :3])
         extra = p.stdout.read(1) if got == need else b""
         if extra:
             p.abort()
@@ -427,13 +441,16 @@ def run_video_np(frames, width, scale, nr, motion, engine, motion_vis, exe, adap
         if preview:
             diagnostics += "\n" + preview
         p.check_timeout()
+        if feed_errors:
+            raise RuntimeError("DLSS input frame stream failed") from feed_errors[0]
         if extra:
             raise RuntimeError("Unexpected extra stdout bytes: binary frame stream was "
                                "polluted or the worker returned extra frames.\n" + diagnostics)
         if rc != 0 or got != need:
             raise RuntimeError(f"video2dlssnr failed (exit {rc}, got {got}/{need} bytes)\n"
                                + diagnostics)
-        return np.frombuffer(buf, frames.dtype).reshape(b, out_h, out_w, 4)[..., :3]
+        return (np.frombuffer(buf, frames.dtype).reshape(b, out_h, out_w, 4)[..., :3]
+                if sink is None else None)
     finally:
         if p.poll() is None:
             p.abort()
@@ -587,8 +604,18 @@ class DLSSNRVideo:
                                                     "the VIDEO output (the batch carries none). Does NOT "
                                                     "add frames — the frame count stays the same. Ignored "
                                                     "when a VIDEO is connected."}),
+                "output_mode": (["auto", "file_video", "images_and_video"], {"default": "auto",
+                    "tooltip": "auto: VIDEO-only graphs stream to a file; connected IMAGE output keeps legacy tensors. file_video blocks IMAGE output to keep RAM bounded."}),
             },
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
+
+    @classmethod
+    def IS_CHANGED(cls, output_mode="auto", prompt=None, unique_id=None, **kwargs):
+        # Graph consumers are not ordinary input values in Comfy's cache key.
+        # Reconnecting IMAGE after a VIDEO-only run must not reuse a blocker.
+        from .stream_video import wants_file_video
+        return wants_file_video(output_mode, prompt, unique_id)
 
     RETURN_TYPES = ("IMAGE", "VIDEO")
     RETURN_NAMES = ("images", "video")
@@ -600,6 +627,13 @@ class DLSSNRVideo:
                    "clips (PQ / HLG) are handled as HDR and the VIDEO output is tagged accordingly.")
 
     def run(self, style, preset, intensity, local_structure, local_tone, skin,
+            detail, color, ui_correction, auto_mask, scale, width, height, adapter, sr_preset,
+            motion, motion_engine, motion_vis, hdr_source="auto", sdr_white=203.0, video=None,
+            images=None, images_fps=24.0, output_mode="auto", prompt=None, unique_id=None):
+        from .stream_video import run_streaming_video
+        return run_streaming_video(self, locals())
+
+    def _legacy_run(self, style, preset, intensity, local_structure, local_tone, skin,
             detail, color, ui_correction, auto_mask, scale, width, height, adapter, sr_preset,
             motion, motion_engine, motion_vis, hdr_source="auto", sdr_white=203.0, video=None,
             images=None, images_fps=24.0):

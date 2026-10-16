@@ -6,6 +6,16 @@
 
 本项目基于 [video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr) 构建，提供 Linux / Wine 适配与部署工具，并保留 Windows 原生执行方式。Linux 后端目前为实验性功能。
 
+## 0.2.0：逐帧视频处理
+
+`DLSSNR_Video` 新增末尾参数 `output_mode`，旧工作流无需重建节点：
+
+- `auto`（默认）：只连接 VIDEO 输出时，逐帧输入同一个 DLSS 工作进程，再逐帧编码为文件 VIDEO；不会为整片创建超分浮点张量。
+- `file_video`：强制文件输出；IMAGE 输出被阻断。适合 SR → NR → 补帧 → SaveVideo。
+- `images_and_video`：兼容旧 IMAGE 消费者，保留一个完整结果张量；输入转换和 worker 输出仍逐帧进行。
+
+与影栈 H3 0.6.9 配合时，普通 CreateVideo 接线可以继续用；更低内存的完整链路是「全部导出＋滚动生成」的 `final_video` → DLSS `video`。一采 `first_pass_video` 单独接 SaveVideo。详见 [内存与文件交接](STREAMING.md)。
+
 ## 产品功能
 
 - **图像处理**：处理单张图像或图像批次，提供 Neural Rendering 与 DLSS 超分相关参数。

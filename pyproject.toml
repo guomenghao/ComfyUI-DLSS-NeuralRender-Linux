@@ -1,10 +1,10 @@
 [project]
 name = "comfyui-dlss-neuralrender-linux"
-version = "0.1.0"
+version = "0.2.0"
 description = "Experimental Linux/Wine transport for video2dlssnr ComfyUI nodes"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
-dependencies = ["numpy", "Pillow", "torch"]
+dependencies = ["numpy", "Pillow", "torch", "av>=14"]
 
 [project.urls]
 Repository = "https://github.com/guomenghao/ComfyUI-DLSS-NeuralRender-Linux"
