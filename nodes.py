@@ -732,14 +732,19 @@ class DLSSNRRuntimeInfo:
         return ("\n".join(lines)[-4000:],)
 
 
+from .video_guard import DLSSNRVideoTimingGuard
+
+
 NODE_CLASS_MAPPINGS = {
     "DLSSNR_Image": DLSSNRImage,
     "DLSSNR_Video": DLSSNRVideo,
     "DLSSNR_RuntimeInfo": DLSSNRRuntimeInfo,
+    "DLSSNR_VideoTimingGuard": DLSSNRVideoTimingGuard,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DLSSNR_Image": "DLSS Neural Rendering (Image)",
     "DLSSNR_Video": "DLSS Neural Rendering (Video)",
     "DLSSNR_RuntimeInfo": "DLSS NR Runtime Check",
+    "DLSSNR_VideoTimingGuard": "DLSS 视频时长与音轨检查",
 }

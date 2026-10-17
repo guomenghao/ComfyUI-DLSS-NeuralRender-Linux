@@ -11,6 +11,8 @@ import uuid
 import numpy as np
 import torch
 
+from .video_timing import CadenceCheck, Timeline, rate, source_hints, validate_file
+
 log = logging.getLogger(__name__)
 
 
@@ -43,27 +45,32 @@ def wants_file_video(mode, prompt, unique_id):
 
 class FrameSource:
     """Reiterable frame-sized conversion. shape/dtype describe the wire protocol."""
-    def __init__(self, *, images=None, path=None, transfer=None):
+    def __init__(self, *, images=None, path=None, transfer=None, fps=None, hints=(), duration=None):
         self.images, self.path, self.transfer = images, path, transfer
         self.dtype = np.dtype('uint16' if transfer else 'uint8')
         if images is not None:
             from .nodes import validate_tensor
             validate_tensor(images)
             self.shape = (*images.shape[:3], 3)
+            self.timeline = Timeline(rate(fps) or Fraction(24), len(images))
         else:
             import av
             with av.open(str(path)) as source:
                 stream = source.streams.video[0]
+                stream.codec_context.thread_count = 2
+                cadence = CadenceCheck(stream, hints)
                 # Count actual frames. Container estimates can exceed decoded
                 # frames (VFR, edited files); this pass retains only one frame.
                 from .nodes import check_comfy_cancelled
                 count = 0
-                for _ in source.decode(stream):
+                for frame in source.decode(stream):
                     check_comfy_cancelled()
+                    cadence.observe(frame)
                     count += 1
                 self.shape = (count, stream.height, stream.width, 3)
             if not count:
                 raise ValueError('DLSS VIDEO contains no decodable frames')
+            self.timeline = cadence.finish(duration)
 
     def __iter__(self):
         from .nodes import check_comfy_cancelled, to_u8, to_u16
@@ -75,6 +82,7 @@ class FrameSource:
         else:
             import av
             with av.open(str(self.path)) as source:
+                source.streams.video[0].codec_context.thread_count = 2
                 for frame in source.decode(video=0):
                     check_comfy_cancelled()
                     yield frame.to_ndarray(format='rgb48le' if self.transfer else 'rgb24')
@@ -133,10 +141,13 @@ def audio_frames(audio, source_path, rate_limit):
 
 class FileSink:
     """Single encoder session; never accumulate output frames in Python."""
-    def __init__(self, path, width, height, fps, transfer, audio_info=None):
+    def __init__(self, path, width, height, fps, transfer, audio_info=None, *,
+                 timeline=None, audio_source=None):
         import av
         self.path, self.count = Path(path), 0
         self.transfer = transfer
+        self.timeline, self.audio_source = timeline, audio_source
+        self.audio_copy, self.audio_window = False, None
         self.container = av.open(str(path), 'w', format='mp4')
         try:
             # SDR lossless RGB avoids cumulative SR -> NR quantization. HDR
@@ -154,7 +165,19 @@ class FileSink:
             ctx.color_range = 2
             self.fps = fps
             self.audio_stream = None
-            if audio_info:
+            if audio_info and audio_source is not None:
+                with av.open(str(audio_source)) as source:
+                    audio = source.streams.audio[0]
+                    audio_start = (audio.start_time or 0) * audio.time_base
+                    origin = timeline.origin if timeline else Fraction(0)
+                    # If substantial audio precedes the video, trimming inside
+                    # an AAC packet needs decoded samples. Preserve encoder
+                    # preroll for an otherwise aligned track when copying.
+                    if (audio.codec_context.name == 'aac'
+                            and audio_start >= origin-Fraction(2048, audio.codec_context.sample_rate)):
+                        self.audio_stream = self.container.add_stream_from_template(audio, opaque=True)
+                        self.audio_copy = True
+            if audio_info and not self.audio_copy:
                 rate, layout = audio_info
                 self.audio_stream = self.container.add_stream('aac', rate=rate)
                 self.audio_stream.layout = layout
@@ -179,10 +202,24 @@ class FileSink:
 
     def finish(self, audio=None, source_path=None):
         import av
+        if self.timeline is not None and self.count != self.timeline.count:
+            raise RuntimeError(f'DLSS 返回帧数异常：预期 {self.timeline.count}，实际 {self.count}。未输出成片。')
         for packet in self.stream.encode():
             self.container.mux(packet)
+        duration = float(self.timeline.duration if self.timeline else self.count / self.fps)
+        if self.audio_copy:
+            self._copy_audio(duration)
+            if self.audio_window is None:
+                raise RuntimeError('DLSS 未能保留输入音轨的有效区间，已停止输出。')
+            self.close()
+            if self.timeline is not None:
+                validate_file(self.path, self.timeline, self.audio_window)
+            return
         resampler = None
-        for frame in audio_frames(audio, source_path, float(self.count / self.fps)):
+        for frame in audio_frames(audio, source_path, duration):
+            start = float(frame.pts * frame.time_base)
+            end = start + frame.samples / frame.sample_rate
+            self.audio_window = (start if self.audio_window is None else self.audio_window[0], end)
             if resampler is None:
                 resampler = av.AudioResampler(format='fltp', layout=frame.layout.name, rate=frame.sample_rate)
             for converted in resampler.resample(frame):
@@ -195,6 +232,34 @@ class FileSink:
             for packet in self.audio_stream.encode():
                 self.container.mux(packet)
         self.close()
+        if self.timeline is not None:
+            validate_file(self.path, self.timeline, self.audio_window)
+
+    def _copy_audio(self, duration):
+        """Copy AAC packets with their offset; never re-encode the whole soundtrack."""
+        import av
+        from .nodes import check_comfy_cancelled
+        with av.open(str(self.audio_source)) as source:
+            video, audio = source.streams.video[0], source.streams.audio[0]
+            origin = self.timeline.origin if self.timeline else (video.start_time or 0) * video.time_base
+            shift = round(origin / audio.time_base)
+            limit = round(Fraction(str(duration)) / audio.time_base)
+            for packet in source.demux(audio):
+                check_comfy_cancelled()
+                if packet.pts is None or packet.dts is None:
+                    continue
+                pts = packet.pts - shift
+                if pts >= limit:
+                    continue
+                packet.pts, packet.dts = pts, packet.dts-shift
+                packet.duration = min(packet.duration, limit-pts)
+                start = max(0., float(pts * audio.time_base))
+                end = min(duration, float((pts+packet.duration)*audio.time_base))
+                if end > start:
+                    self.audio_window = (start if self.audio_window is None else self.audio_window[0], end)
+                packet.stream = self.audio_stream
+                self.container.mux(packet)
+        log.info('DLSS timing audio: AAC packet copy, window=%s', self.audio_window)
 
     def close(self):
         if self.container is not None:
@@ -218,6 +283,7 @@ def run_streaming_video(node, args):
     video, images = args['video'], args['images']
     transfer = n.resolve_transfer(args['hdr_source'], video)
     audio, source_path = None, None
+    hints, duration = (), None
     fps = Fraction(args['images_fps']).limit_denominator(1000)
     memory_stage('input_before', file_output=file_output)
     with ExitStack() as stack:
@@ -232,15 +298,16 @@ def run_streaming_video(node, args):
             # files. Never call file VIDEO.get_components(), which decodes all.
             temporary = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='dlss_source_')))
             source_path = temporary / 'source.mkv'
+            hints, duration = source_hints(video)
             video.save_to(str(source_path))
             images = None
-            with av.open(str(source_path)) as source:
-                fps = Fraction(source.streams.video[0].average_rate)
         if not math.isfinite(float(fps)) or fps <= 0:
             raise ValueError('Video frame rate must be positive and finite')
         if images is None and source_path is None:
             raise ValueError('Connect VIDEO or IMAGE to DLSS')
-        frames = FrameSource(images=images, path=source_path, transfer=transfer)
+        frames = FrameSource(images=images, path=source_path, transfer=transfer,
+                             fps=fps, hints=hints, duration=duration)
+        fps = frames.timeline.fps
         total, h, w, _ = frames.shape
         out_w, out_h = n.out_dims(w, h, args['width'], args['scale'], args['height'])
         pbar = None
@@ -273,7 +340,8 @@ def run_streaming_video(node, args):
                         if source.streams.audio:
                             a = source.streams.audio[0]
                             audio_info = (a.codec_context.sample_rate, a.codec_context.layout.name)
-                sink = FileSink(output_path, out_w, out_h, fps, transfer, audio_info)
+                sink = FileSink(output_path, out_w, out_h, fps, transfer, audio_info,
+                                timeline=frames.timeline, audio_source=source_path)
                 consume = sink
             else:
                 # One mandatory legacy output, converted one frame at a time.
@@ -295,15 +363,21 @@ def run_streaming_video(node, args):
                 return ExecutionBlocker(None), VideoFromFile(str(output_path))
             if audio is None and source_path is not None:
                 # IMAGE consumers explicitly request full images. Audio alone
-                # may be collected; never re-decode full video for this purpose.
-                parts = list(audio_frames(None, source_path, float(total / fps)))
-                if parts:
-                    resampler = av.AudioResampler(format='fltp', layout=parts[0].layout.name,
-                                                  rate=parts[0].sample_rate)
-                    arrays = [f.to_ndarray() for p in parts for f in resampler.resample(p)]
-                    arrays += [f.to_ndarray() for f in resampler.resample(None)]
-                    audio = {'waveform': torch.from_numpy(np.concatenate(arrays, axis=1))[None],
-                             'sample_rate': parts[0].sample_rate}
+                # may be collected. Preserve start offsets/gaps, not concatenate
+                # delayed audio at t=0. No list of duplicate audio buffers.
+                waveform, sample_rate, used = None, None, 0
+                for part in audio_frames(None, source_path, float(total / fps)):
+                    if waveform is None:
+                        sample_rate = part.sample_rate
+                        waveform = np.zeros((len(part.layout.channels), math.ceil(float(total/fps)*sample_rate)),
+                                            dtype=np.float32)
+                    start = max(0, round(part.pts * part.time_base * sample_rate))
+                    end = min(waveform.shape[1], start+part.samples)
+                    waveform[:, start:end] = part.to_ndarray()[:, :end-start]
+                    used = max(used,end)
+                if waveform is not None:
+                    audio = {'waveform': torch.from_numpy(waveform[:, :used])[None],
+                             'sample_rate': sample_rate}
             return output, n.make_video(output, audio, fps, transfer)
         except BaseException:
             if sink is not None:

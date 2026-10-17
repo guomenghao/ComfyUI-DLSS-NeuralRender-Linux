@@ -6,6 +6,14 @@
 
 本项目基于 [video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr) 构建，提供 Linux / Wine 适配与部署工具，并保留 Windows 原生执行方式。Linux 后端目前为实验性功能。
 
+## 0.2.1：保留视频时间轴与完整音轨
+
+修复 PyAV 17.1.0 下临时 MKV 的 `average_rate` 漂移导致 SR → NR 连续加速、音轨尾部被截短的问题。现在保存原 VIDEO 的候选帧率，用逐帧时间戳核验真实节奏，再编码；不把临时封装的平均帧率直接当作新播放速度。支持 24、25、30、30000/1001 等恒定帧率，不写死 24 fps。
+
+AAC 文件音轨优先直接复制压缩包，其他音轨保持逐块处理。每次文件输出检查帧数、帧率、时长及音轨时间范围，失败时不给下游返回不完整视频。新增 **DLSS 视频时长与音轨检查** 节点，可放在外部补帧之后、SaveVideo 之前，reference_video 接原二采 VIDEO，video 接后处理 VIDEO；检查通过才交给保存节点。关闭补帧时也可直接检查 24 fps 原片。
+
+旧 `DLSSNR_Video` 的输入、输出及参数顺序保持不变。更新不会修改 H3 的 seed、缓存或采样逻辑。具体升级、限制和验证方法见 [时间轴修复说明](TIMING.md)。
+
 ## 0.2.0：逐帧视频处理
 
 `DLSSNR_Video` 新增末尾参数 `output_mode`，旧工作流无需重建节点：
@@ -36,6 +44,7 @@
 | **DLSS Neural Rendering (Image)** | 单图及图像批次处理 | `IMAGE` → `IMAGE` |
 | **DLSS Neural Rendering (Video)** | 视频时序处理 | `VIDEO` 或 `IMAGE` → `IMAGE`、`VIDEO` |
 | **DLSS NR Runtime Check** | 运行环境检查 | 输出 `STRING` |
+| **DLSS 视频时长与音轨检查** | 与二采原片核对后处理时长、帧数和音轨 | 两个 `VIDEO` → 原样返回待保存 `VIDEO`、`STRING` 报告 |
 
 保留上游节点 ID：`DLSSNR_Image`、`DLSSNR_Video`、`DLSSNR_RuntimeInfo`，方便衔接已有工作流。原版 `video2dlssnr` 与本项目使用相同 ID，请避免同时加载。
 
